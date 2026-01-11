@@ -186,6 +186,151 @@ func (h *Homepage) Port() int {
 	return h.port
 }
 
+// populateSampleListings adds demo listings from various pseudonymous sellers
+func populateSampleListings(m *market.Marketplace) {
+	// Sample listings with images (using placeholder service or data URIs)
+	samples := []struct {
+		title, desc, category string
+		price                 int64
+		currency, image       string
+		seller, sellerID      string
+	}{
+		{
+			"Secure VPN Config Generator",
+			"Generate custom WireGuard and OpenVPN configs optimized for privacy. Includes killswitch settings and DNS leak protection.",
+			"software",
+			50, "KNT",
+			"https://picsum.photos/seed/vpn/400/300",
+			"CipherPunk", "node_cipherpunk_001",
+		},
+		{
+			"Privacy-Focused Linux ISO",
+			"Custom hardened Linux distribution with pre-configured Tor, encrypted home, and security tools. Based on Debian.",
+			"software",
+			0, "KNT",
+			"https://picsum.photos/seed/linux/400/300",
+			"TuxMaster", "node_tuxmaster_002",
+		},
+		{
+			"Encrypted Cloud Storage - 100GB",
+			"Zero-knowledge encrypted storage. Your keys, your data. Accessible via KayakNet only. 1 year subscription.",
+			"services",
+			200, "KNT",
+			"https://picsum.photos/seed/cloud/400/300",
+			"VaultKeeper", "node_vaultkeeper_003",
+		},
+		{
+			"Anonymous Email Hosting",
+			"Private email server accessible through KayakNet. No logs, no tracking. Includes 5 aliases.",
+			"services",
+			150, "KNT",
+			"https://picsum.photos/seed/email/400/300",
+			"GhostMail", "node_ghostmail_004",
+		},
+		{
+			"Crypto Privacy Consultation",
+			"1 hour consultation on cryptocurrency privacy: mixing strategies, privacy coins, avoiding chain analysis.",
+			"consulting",
+			100, "KNT",
+			"https://picsum.photos/seed/crypto/400/300",
+			"SatoshiGhost", "node_satoshighost_005",
+		},
+		{
+			"Custom Onion Router Setup",
+			"Help setting up your own Tor relay or bridge. Includes server hardening and monitoring setup.",
+			"consulting",
+			75, "KNT",
+			"https://picsum.photos/seed/onion/400/300",
+			"RelayRunner", "node_relayrunner_006",
+		},
+		{
+			"Secure Messaging Bot Development",
+			"Custom bot development for Signal, Matrix, or XMPP. Privacy-focused, self-hosted solutions.",
+			"development",
+			300, "KNT",
+			"https://picsum.photos/seed/bot/400/300",
+			"ByteWeaver", "node_byteweaver_007",
+		},
+		{
+			"Hardware Security Key Programming",
+			"Custom firmware for YubiKey clones. FIDO2/U2F with custom attestation.",
+			"hardware",
+			250, "KNT",
+			"https://picsum.photos/seed/hardware/400/300",
+			"ChipWizard", "node_chipwizard_008",
+		},
+		{
+			"Decentralized Website Hosting",
+			"Host your .kyk website on KayakNet. Censorship-resistant, always online. 1 year hosting.",
+			"services",
+			120, "KNT",
+			"https://picsum.photos/seed/web/400/300",
+			"NetNomad", "node_netnomad_009",
+		},
+		{
+			"OSINT Training Course",
+			"10-part video course on open source intelligence gathering. Learn to investigate while staying anonymous.",
+			"education",
+			180, "KNT",
+			"https://picsum.photos/seed/osint/400/300",
+			"ShadowScout", "node_shadowscout_010",
+		},
+		{
+			"Secure Code Audit Service",
+			"Security review of your application code. Focus on cryptography, authentication, and data handling.",
+			"consulting",
+			500, "KNT",
+			"https://picsum.photos/seed/audit/400/300",
+			"BugHunter", "node_bughunter_011",
+		},
+		{
+			"Private DNS Server Setup",
+			"Set up your own encrypted DNS server. DoH/DoT support. No logging, full privacy.",
+			"services",
+			60, "KNT",
+			"https://picsum.photos/seed/dns/400/300",
+			"DNSNinja", "node_dnsninja_012",
+		},
+		{
+			"Encrypted Backup Service - 500GB",
+			"Distributed, encrypted backups across KayakNet. Data split across multiple nodes.",
+			"services",
+			350, "KNT",
+			"https://picsum.photos/seed/backup/400/300",
+			"DataVault", "node_datavault_013",
+		},
+		{
+			"Anonymous Domain Registration Guide",
+			"Complete guide to registering domains anonymously. Includes privacy-friendly registrars list.",
+			"education",
+			25, "KNT",
+			"https://picsum.photos/seed/domain/400/300",
+			"DomainGhost", "node_domainghost_014",
+		},
+		{
+			"P2P File Sharing Node Setup",
+			"Configure your own BitTorrent node with VPN, blocklists, and RSS automation.",
+			"consulting",
+			40, "KNT",
+			"https://picsum.photos/seed/torrent/400/300",
+			"SeedMaster", "node_seedmaster_015",
+		},
+		{
+			"Steganography Toolkit",
+			"Advanced tools for hiding data in images, audio, and video. Includes detection evasion techniques.",
+			"software",
+			80, "KNT",
+			"https://picsum.photos/seed/stego/400/300",
+			"HiddenByte", "node_hiddenbyte_016",
+		},
+	}
+
+	for _, s := range samples {
+		m.AddSampleListing(s.title, s.desc, s.category, s.price, s.currency, s.image, s.seller, s.sellerID)
+	}
+	log.Printf("[MARKET] Added %d sample listings", len(samples))
+}
+
 func main() {
 	flag.Parse()
 
@@ -374,6 +519,9 @@ func NewNode(cfg *config.Config, name string) (*Node, error) {
 		ed25519.PrivateKey(id.PrivateKey()),
 		id.Sign,
 	)
+
+	// Populate sample listings for demo
+	populateSampleListings(n.marketplace)
 
 	// Create chat manager (only accessible through network)
 	n.chatMgr = chat.NewChatManager(
@@ -1649,18 +1797,31 @@ func (h *Homepage) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 func (h *Homepage) handleListings(w http.ResponseWriter, r *http.Request) {
 	category := r.URL.Query().Get("category")
+	query := r.URL.Query().Get("q")
 	var listings []map[string]interface{}
 
 	if h.node != nil {
-		for _, l := range h.node.marketplace.Browse(category) {
+		var results []*market.Listing
+		if query != "" {
+			results = h.node.marketplace.Search(query)
+		} else {
+			results = h.node.marketplace.Browse(category)
+		}
+		
+		for _, l := range results {
 			listings = append(listings, map[string]interface{}{
 				"id":          l.ID,
 				"title":       l.Title,
 				"description": l.Description,
 				"price":       l.Price,
 				"currency":    l.Currency,
+				"image":       l.Image,
 				"seller_id":   l.SellerID,
+				"seller_name": l.SellerName,
 				"category":    l.Category,
+				"rating":      l.Rating,
+				"review_count": l.ReviewCount,
+				"views":       l.Views,
 				"created_at":  l.CreatedAt.Format(time.RFC3339),
 			})
 		}
@@ -1761,7 +1922,8 @@ func (h *Homepage) handleStats(w http.ResponseWriter, r *http.Request) {
 		h.node.mu.RLock()
 		stats["peers"] = len(h.node.connections)
 		h.node.mu.RUnlock()
-		stats["listings"] = len(h.node.marketplace.Browse(""))
+		stats["listings"] = h.node.marketplace.ListingCount()
+		stats["marketplace_listings"], stats["marketplace_categories"] = h.node.marketplace.Stats()
 		stats["domains"] = len(h.node.nameService.Search(""))
 		stats["relay_count"] = h.node.onionRouter.GetRelayCount()
 		stats["anonymous"] = h.node.onionRouter.CanRoute()
@@ -2106,10 +2268,10 @@ const marketplaceHTML = `<!DOCTYPE html>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=VT323&display=swap');
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        :root { --bg: #000; --green: #00ff00; --green-dim: #00aa00; --green-glow: #00ff0066; --border: #00ff0033; }
+        :root { --bg: #000; --green: #00ff00; --green-dim: #00aa00; --green-glow: #00ff0066; --border: #00ff0033; --amber: #ffaa00; }
         body { font-family: 'VT323', monospace; background: var(--bg); color: var(--green); min-height: 100vh; }
         body::before { content: ""; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: repeating-linear-gradient(0deg, rgba(0,0,0,0.15) 0px, rgba(0,0,0,0.15) 1px, transparent 1px, transparent 2px); pointer-events: none; z-index: 1000; }
-        .container { max-width: 1000px; margin: 0 auto; padding: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
         .terminal { border: 1px solid var(--green); background: #0a0a0a; box-shadow: 0 0 20px var(--green-glow); }
         .term-header { background: var(--green); color: var(--bg); padding: 5px 15px; font-size: 14px; }
         .term-body { padding: 20px; }
@@ -2124,22 +2286,32 @@ const marketplaceHTML = `<!DOCTYPE html>
         .toolbar { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
         input, select { padding: 10px; background: var(--bg); border: 1px solid var(--green); color: var(--green); font-family: inherit; font-size: 16px; }
         input:focus, select:focus { outline: none; box-shadow: 0 0 10px var(--green-glow); }
+        input::placeholder { color: var(--green-dim); }
         select { cursor: pointer; }
         .btn { padding: 10px 20px; background: var(--green); color: var(--bg); border: none; cursor: pointer; font-family: inherit; font-size: 16px; }
         .btn:hover { box-shadow: 0 0 15px var(--green-glow); }
-        .listings { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 15px; }
-        .listing { border: 1px solid var(--border); padding: 15px; background: var(--bg); transition: all 0.2s; }
-        .listing:hover { border-color: var(--green); box-shadow: 0 0 10px var(--green-glow); }
-        .listing h3 { color: var(--green); margin-bottom: 10px; }
-        .listing .price { color: var(--green); font-size: 22px; margin: 10px 0; }
-        .listing .desc { color: var(--green-dim); font-size: 14px; margin-bottom: 10px; }
-        .listing .meta { color: var(--green-dim); font-size: 12px; opacity: 0.7; }
+        .stats { display: flex; gap: 20px; margin-bottom: 20px; font-size: 14px; color: var(--green-dim); }
+        .listings { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 20px; }
+        .listing { border: 1px solid var(--border); background: var(--bg); transition: all 0.3s; overflow: hidden; }
+        .listing:hover { border-color: var(--green); box-shadow: 0 0 20px var(--green-glow); transform: translateY(-2px); }
+        .listing-img { width: 100%; height: 180px; object-fit: cover; border-bottom: 1px solid var(--border); filter: grayscale(30%) brightness(0.9); }
+        .listing:hover .listing-img { filter: grayscale(0%) brightness(1); }
+        .listing-content { padding: 15px; }
+        .listing h3 { color: var(--green); margin-bottom: 8px; font-size: 18px; }
+        .listing .price { color: var(--amber); font-size: 24px; margin: 10px 0; text-shadow: 0 0 10px var(--amber); }
+        .listing .price.free { color: var(--green); text-shadow: 0 0 10px var(--green-glow); }
+        .listing .desc { color: var(--green-dim); font-size: 14px; margin-bottom: 12px; line-height: 1.4; max-height: 60px; overflow: hidden; }
+        .listing .meta { display: flex; justify-content: space-between; align-items: center; border-top: 1px dashed var(--border); padding-top: 10px; margin-top: 10px; }
+        .listing .seller { color: var(--green); font-size: 14px; }
+        .listing .seller::before { content: "@"; color: var(--green-dim); }
+        .listing .rating { color: var(--amber); font-size: 14px; }
+        .listing .category { background: var(--border); color: var(--green); padding: 2px 8px; font-size: 12px; display: inline-block; margin-bottom: 8px; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="terminal">
-            <div class="term-header">KAYAKNET MARKETPLACE // ANONYMOUS COMMERCE</div>
+            <div class="term-header">KAYAKNET MARKETPLACE // ANONYMOUS P2P COMMERCE</div>
             <div class="term-body">
                 <header>
                     <a href="/" class="logo">KAYAKNET</a>
@@ -2151,18 +2323,22 @@ const marketplaceHTML = `<!DOCTYPE html>
                     </nav>
                 </header>
                 <h1>MARKETPLACE_</h1>
+                <div class="stats" id="stats">LOADING STATS...</div>
                 <div class="toolbar">
-                    <input type="text" id="search" placeholder="search://..." style="flex: 1; min-width: 200px;" />
+                    <input type="text" id="search" placeholder="SEARCH://..." style="flex: 1; min-width: 200px;" />
                     <select id="category">
                         <option value="">ALL_CATEGORIES</option>
-                        <option value="digital">DIGITAL</option>
+                        <option value="software">SOFTWARE</option>
                         <option value="services">SERVICES</option>
-                        <option value="other">OTHER</option>
+                        <option value="consulting">CONSULTING</option>
+                        <option value="development">DEVELOPMENT</option>
+                        <option value="education">EDUCATION</option>
+                        <option value="hardware">HARDWARE</option>
                     </select>
-                    <button class="btn" onclick="alert('CMD: sell [title] [price] [desc]')">+NEW</button>
+                    <button class="btn" onclick="alert('Use CLI: sell [title] [price] [desc]')">+ LIST ITEM</button>
                 </div>
                 <div class="listings" id="listings">
-                    <div class="listing"><h3>LOADING...</h3><p class="desc">Fetching data...</p></div>
+                    <div class="listing"><div class="listing-content"><h3>LOADING...</h3><p class="desc">Fetching data from network...</p></div></div>
                 </div>
             </div>
         </div>
@@ -2174,11 +2350,35 @@ const marketplaceHTML = `<!DOCTYPE html>
             const res = await fetch('/api/listings?category=' + category + '&q=' + search);
             const listings = await res.json();
             const container = document.getElementById('listings');
+            
+            // Update stats
+            const statsRes = await fetch('/api/stats');
+            const stats = await statsRes.json();
+            document.getElementById('stats').innerHTML = 'LISTINGS: ' + stats.marketplace_listings + ' | CATEGORIES: ' + stats.marketplace_categories + ' | NETWORK: SECURE';
+            
             if (!listings || listings.length === 0) {
-                container.innerHTML = '<div class="listing"><h3>NO_LISTINGS</h3><p class="desc">Be the first to list something!</p></div>';
+                container.innerHTML = '<div class="listing"><div class="listing-content"><h3>NO_LISTINGS_FOUND</h3><p class="desc">No items match your search. Try different keywords or browse all categories.</p></div></div>';
                 return;
             }
-            container.innerHTML = listings.map(l => '<div class="listing"><h3>' + l.title.toUpperCase() + '</h3><div class="price">' + l.price + ' ' + l.currency + '</div><p class="desc">' + (l.description || 'No description') + '</p><p class="meta">SELLER: ' + l.seller_id.substring(0, 16) + '...</p></div>').join('');
+            container.innerHTML = listings.map(l => {
+                const priceClass = l.price === 0 ? 'price free' : 'price';
+                const priceText = l.price === 0 ? 'FREE' : l.price + ' ' + (l.currency || 'KNT');
+                const imgUrl = l.image || 'https://picsum.photos/seed/' + l.id + '/400/300';
+                const sellerName = l.seller_name || 'anonymous';
+                const rating = l.rating ? l.rating.toFixed(1) : '-';
+                const catDisplay = (l.category || 'misc').toUpperCase();
+                return '<div class="listing">' +
+                    '<img class="listing-img" src="' + imgUrl + '" alt="' + l.title + '" onerror="this.style.display=\'none\'">' +
+                    '<div class="listing-content">' +
+                    '<span class="category">' + catDisplay + '</span>' +
+                    '<h3>' + l.title.toUpperCase() + '</h3>' +
+                    '<div class="' + priceClass + '">' + priceText + '</div>' +
+                    '<p class="desc">' + (l.description || 'No description available') + '</p>' +
+                    '<div class="meta">' +
+                    '<span class="seller">' + sellerName + '</span>' +
+                    '<span class="rating">' + rating + ' RATING</span>' +
+                    '</div></div></div>';
+            }).join('');
         }
         document.getElementById('search').addEventListener('input', loadListings);
         document.getElementById('category').addEventListener('change', loadListings);

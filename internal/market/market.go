@@ -4,10 +4,11 @@ package market
 
 import (
 	"crypto/ed25519"
-	"crypto/rand"
+	crand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"math/rand"
 	"sync"
 	"time"
 )
@@ -26,7 +27,9 @@ type Listing struct {
 	Category    string    `json:"category"`
 	Price       int64     `json:"price"`       // In network credits/tokens
 	Currency    string    `json:"currency"`    // "credits", "btc", "xmr", etc.
+	Image       string    `json:"image"`       // Image URL or data URI
 	SellerID    string    `json:"seller_id"`   // Node ID (anonymous)
+	SellerName  string    `json:"seller_name"` // Pseudonym/handle
 	SellerKey   []byte    `json:"seller_key"`  // Public key for verification
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
@@ -93,8 +96,17 @@ func NewMarketplace(localID string, pubKey ed25519.PublicKey, privKey ed25519.Pr
 
 // CreateListing creates a new listing
 func (m *Marketplace) CreateListing(title, description, category string, price int64, currency string, ttl time.Duration) (*Listing, error) {
+	return m.CreateListingFull(title, description, category, price, currency, "", "", ttl)
+}
+
+// CreateListingFull creates a new listing with all options
+func (m *Marketplace) CreateListingFull(title, description, category string, price int64, currency, image, sellerName string, ttl time.Duration) (*Listing, error) {
 	if title == "" || price < 0 {
 		return nil, ErrInvalidListing
+	}
+
+	if sellerName == "" {
+		sellerName = "anonymous"
 	}
 
 	listing := &Listing{
@@ -104,7 +116,9 @@ func (m *Marketplace) CreateListing(title, description, category string, price i
 		Category:    category,
 		Price:       price,
 		Currency:    currency,
+		Image:       image,
 		SellerID:    m.localID,
+		SellerName:  sellerName,
 		SellerKey:   m.localKey,
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
@@ -121,6 +135,41 @@ func (m *Marketplace) CreateListing(title, description, category string, price i
 	m.mu.Unlock()
 
 	return listing, nil
+}
+
+// AddSampleListing adds a sample listing (for demo/bootstrap purposes)
+func (m *Marketplace) AddSampleListing(title, description, category string, price int64, currency, image, sellerName, sellerID string) {
+	listing := &Listing{
+		ID:          generateID(),
+		Title:       title,
+		Description: description,
+		Category:    category,
+		Price:       price,
+		Currency:    currency,
+		Image:       image,
+		SellerID:    sellerID,
+		SellerName:  sellerName,
+		SellerKey:   nil, // Sample listings are unsigned
+		CreatedAt:   time.Now().Add(-time.Duration(rand.Intn(72)) * time.Hour), // Random past time
+		UpdatedAt:   time.Now(),
+		ExpiresAt:   time.Now().Add(30 * 24 * time.Hour),
+		Active:      true,
+		Views:       int64(rand.Intn(500) + 10),
+		Purchases:   int64(rand.Intn(50)),
+		Rating:      3.5 + float64(rand.Intn(15))/10.0,
+		ReviewCount: int64(rand.Intn(30)),
+	}
+
+	m.mu.Lock()
+	m.listings[listing.ID] = listing
+	m.mu.Unlock()
+}
+
+// ListingCount returns the number of listings (for debugging)
+func (m *Marketplace) ListingCount() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.listings)
 }
 
 // GetListing returns a listing by ID
@@ -367,7 +416,7 @@ func (m *Marketplace) verifyListing(l *Listing) bool {
 
 func generateID() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	crand.Read(b)
 	return hex.EncodeToString(b)
 }
 
