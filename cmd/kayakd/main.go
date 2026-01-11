@@ -64,6 +64,7 @@ type Node struct {
 	chatMgr      *chat.ChatManager
 	nameService  *names.NameService
 	browserProxy *proxy.Proxy
+	homepage     *Homepage
 	listener     net.PacketConn
 	connections  map[string]*PeerConn
 	ctx          context.Context
@@ -109,6 +110,80 @@ type P2PMessage struct {
 	Nonce     uint64          `json:"nonce"`
 	Payload   json.RawMessage `json:"payload"`
 	Signature []byte          `json:"sig"`
+}
+
+// Homepage serves the main KayakNet portal at home.kyk
+type Homepage struct {
+	mu      sync.RWMutex
+	port    int
+	node    *Node
+	server  *http.Server
+	running bool
+}
+
+// NewHomepage creates a new homepage server
+func NewHomepage(node *Node) *Homepage {
+	return &Homepage{
+		port: 8080,
+		node: node,
+	}
+}
+
+// Start starts the homepage server
+func (h *Homepage) Start(port int) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.running {
+		return nil
+	}
+
+	h.port = port
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", h.handleHome)
+	mux.HandleFunc("/api/search", h.handleSearch)
+	mux.HandleFunc("/api/listings", h.handleListings)
+	mux.HandleFunc("/api/chat", h.handleChat)
+	mux.HandleFunc("/api/domains", h.handleDomains)
+	mux.HandleFunc("/api/peers", h.handlePeers)
+	mux.HandleFunc("/api/stats", h.handleStats)
+	mux.HandleFunc("/marketplace", h.handleMarketplace)
+	mux.HandleFunc("/chat", h.handleChatPage)
+	mux.HandleFunc("/domains", h.handleDomainsPage)
+	mux.HandleFunc("/network", h.handleNetworkPage)
+
+	h.server = &http.Server{
+		Addr:    fmt.Sprintf("127.0.0.1:%d", port),
+		Handler: mux,
+	}
+
+	h.running = true
+
+	go func() {
+		if err := h.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("[HOMEPAGE] Server error: %v", err)
+		}
+	}()
+
+	return nil
+}
+
+// Stop stops the homepage server
+func (h *Homepage) Stop() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.server != nil {
+		h.server.Close()
+	}
+	h.running = false
+}
+
+// Port returns the homepage port
+func (h *Homepage) Port() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.port
 }
 
 func main() {
@@ -159,10 +234,19 @@ func main() {
 
 	// Start browser proxy if enabled
 	if *proxyEnable {
+		// Start homepage server first (at home.kyk)
+		homepagePort := 8080
+		if err := node.homepage.Start(homepagePort); err != nil {
+			log.Printf("[WARN] Failed to start homepage: %v", err)
+		}
+		// Tell proxy where homepage is
+		node.browserProxy.SetHomepagePort(homepagePort)
+
 		if err := node.browserProxy.Start(*proxyHTTP, *proxySOCKS); err != nil {
 			log.Printf("[WARN] Failed to start browser proxy: %v", err)
 		} else {
 			fmt.Printf("║  [+] Browser proxy: HTTP %d, SOCKS5 %d                 ║\n", *proxyHTTP, *proxySOCKS)
+			fmt.Println("║  [+] Homepage: http://home.kyk                         ║")
 		}
 	}
 	fmt.Println("╚════════════════════════════════════════════════════════════╝")
@@ -310,6 +394,9 @@ func NewNode(cfg *config.Config, name string) (*Node, error) {
 	resolver := &nodeNameResolver{node: n}
 	sender := &nodeMessageSender{node: n}
 	n.browserProxy = proxy.NewProxy(resolver, sender)
+
+	// Create homepage (served at home.kyk and kayaknet.kyk)
+	n.homepage = NewHomepage(n)
 
 	// Set up chat message handler
 	n.chatMgr.OnMessage(func(msg *chat.Message) {
@@ -1510,5 +1597,896 @@ func (n *Node) cmdHelp() {
 |                                                             |
 | quit/exit            - Exit KayakNet                        |
 +-------------------------------------------------------------+
+
+HOMEPAGE: Browse to http://home.kyk or http://kayaknet.kyk
 `)
 }
+
+// ============================================================================
+// Homepage Handlers
+// ============================================================================
+
+func (h *Homepage) handleHome(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" && r.URL.Path != "/index.html" {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(homepageHTML))
+}
+
+func (h *Homepage) handleSearch(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query().Get("q")
+	var results []map[string]string
+
+	if query != "" && h.node != nil {
+		// Search listings
+		listings := h.node.marketplace.Search(query)
+		for _, l := range listings {
+			results = append(results, map[string]string{
+				"type":        "listing",
+				"title":       l.Title,
+				"description": l.Description,
+				"url":         "/marketplace?id=" + l.ID,
+			})
+		}
+
+		// Search domains
+		domains := h.node.nameService.Search(query)
+		for _, d := range domains {
+			results = append(results, map[string]string{
+				"type":        "domain",
+				"title":       d.Name + ".kyk",
+				"description": d.Description,
+				"url":         "/domains?name=" + d.Name,
+			})
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(results)
+}
+
+func (h *Homepage) handleListings(w http.ResponseWriter, r *http.Request) {
+	category := r.URL.Query().Get("category")
+	var listings []map[string]interface{}
+
+	if h.node != nil {
+		for _, l := range h.node.marketplace.Browse(category) {
+			listings = append(listings, map[string]interface{}{
+				"id":          l.ID,
+				"title":       l.Title,
+				"description": l.Description,
+				"price":       l.Price,
+				"currency":    l.Currency,
+				"seller_id":   l.SellerID,
+				"category":    l.Category,
+				"created_at":  l.CreatedAt.Format(time.RFC3339),
+			})
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(listings)
+}
+
+func (h *Homepage) handleChat(w http.ResponseWriter, r *http.Request) {
+	if r.Method == "POST" {
+		room := r.FormValue("room")
+		message := r.FormValue("message")
+		if h.node != nil && room != "" && message != "" {
+			h.node.chatMgr.SendMessage(room, message)
+		}
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	room := r.URL.Query().Get("room")
+	if room == "" {
+		room = "general"
+	}
+
+	var messages []map[string]string
+	if h.node != nil {
+		for _, m := range h.node.chatMgr.GetMessages(room, 50) {
+			messages = append(messages, map[string]string{
+				"room":      m.Room,
+				"nick":      m.Nick,
+				"content":   m.Content,
+				"timestamp": m.Timestamp.Format("15:04:05"),
+			})
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(messages)
+}
+
+func (h *Homepage) handleDomains(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query().Get("q")
+	var domains []map[string]string
+
+	if h.node != nil {
+		var results []*names.Registration
+		if query != "" {
+			results = h.node.nameService.Search(query)
+		} else {
+			results = h.node.nameService.Search("")
+		}
+
+		for _, d := range results {
+			domains = append(domains, map[string]string{
+				"name":        d.Name,
+				"full_name":   d.Name + ".kyk",
+				"description": d.Description,
+				"owner":       d.NodeID,
+			})
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(domains)
+}
+
+func (h *Homepage) handlePeers(w http.ResponseWriter, r *http.Request) {
+	var peers []map[string]string
+
+	if h.node != nil {
+		h.node.mu.RLock()
+		for id, p := range h.node.connections {
+			peers = append(peers, map[string]string{
+				"id":        id,
+				"name":      p.NodeID[:16] + "...",
+				"last_seen": p.LastSeen.Format("15:04:05"),
+			})
+		}
+		h.node.mu.RUnlock()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(peers)
+}
+
+func (h *Homepage) handleStats(w http.ResponseWriter, r *http.Request) {
+	stats := map[string]interface{}{
+		"peers":       0,
+		"listings":    0,
+		"domains":     0,
+		"messages":    0,
+		"anonymous":   false,
+		"relay_count": 0,
+	}
+
+	if h.node != nil {
+		h.node.mu.RLock()
+		stats["peers"] = len(h.node.connections)
+		h.node.mu.RUnlock()
+		stats["listings"] = len(h.node.marketplace.Browse(""))
+		stats["domains"] = len(h.node.nameService.Search(""))
+		stats["relay_count"] = h.node.onionRouter.GetRelayCount()
+		stats["anonymous"] = h.node.onionRouter.CanRoute()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(stats)
+}
+
+func (h *Homepage) handleMarketplace(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(marketplaceHTML))
+}
+
+func (h *Homepage) handleChatPage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(chatPageHTML))
+}
+
+func (h *Homepage) handleDomainsPage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(domainsPageHTML))
+}
+
+func (h *Homepage) handleNetworkPage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(networkPageHTML))
+}
+
+// ============================================================================
+// Homepage HTML Templates
+// ============================================================================
+
+const homepageHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KayakNet // ANONYMOUS NETWORK</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=VT323&family=Share+Tech+Mono&display=swap');
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --bg: #000000;
+            --bg-term: #0a0a0a;
+            --green: #00ff00;
+            --green-dim: #00aa00;
+            --green-glow: #00ff0066;
+            --amber: #ffaa00;
+            --red: #ff0000;
+            --border: #00ff0033;
+        }
+        body {
+            font-family: 'VT323', 'Share Tech Mono', monospace;
+            background: var(--bg);
+            color: var(--green);
+            min-height: 100vh;
+            position: relative;
+            overflow-x: hidden;
+        }
+        body::before {
+            content: "";
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: repeating-linear-gradient(0deg, rgba(0,0,0,0.15) 0px, rgba(0,0,0,0.15) 1px, transparent 1px, transparent 2px);
+            pointer-events: none;
+            z-index: 1000;
+        }
+        body::after {
+            content: "";
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: radial-gradient(ellipse at center, transparent 0%, rgba(0,0,0,0.4) 100%);
+            pointer-events: none;
+            z-index: 999;
+        }
+        .container { max-width: 1000px; margin: 0 auto; padding: 20px; position: relative; z-index: 1; }
+        .terminal-window {
+            border: 1px solid var(--green);
+            background: var(--bg-term);
+            box-shadow: 0 0 20px var(--green-glow), inset 0 0 20px rgba(0,255,0,0.03);
+        }
+        .terminal-header {
+            background: var(--green);
+            color: var(--bg);
+            padding: 5px 15px;
+            font-size: 14px;
+            display: flex;
+            justify-content: space-between;
+        }
+        .terminal-body { padding: 20px; }
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px 0;
+            border-bottom: 1px dashed var(--border);
+            margin-bottom: 30px;
+        }
+        .logo {
+            font-size: 28px;
+            color: var(--green);
+            text-decoration: none;
+            text-shadow: 0 0 10px var(--green-glow);
+            letter-spacing: 2px;
+        }
+        .logo::before { content: "["; color: var(--green-dim); }
+        .logo::after { content: "]"; color: var(--green-dim); }
+        nav { display: flex; gap: 20px; }
+        nav a {
+            color: var(--green-dim);
+            text-decoration: none;
+            font-size: 16px;
+            padding: 5px 10px;
+            border: 1px solid transparent;
+            transition: all 0.2s;
+        }
+        nav a:hover, nav a.active {
+            color: var(--green);
+            border-color: var(--green);
+            text-shadow: 0 0 5px var(--green-glow);
+        }
+        .status {
+            color: var(--green);
+            animation: blink 1s infinite;
+        }
+        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .ascii-art {
+            text-align: center;
+            padding: 30px 0;
+            font-size: 12px;
+            line-height: 1.2;
+            color: var(--green-dim);
+            white-space: pre;
+            text-shadow: 0 0 5px var(--green-glow);
+        }
+        .hero { text-align: center; padding: 20px 0; }
+        .hero h1 {
+            font-size: 36px;
+            color: var(--green);
+            text-shadow: 0 0 20px var(--green-glow);
+            letter-spacing: 3px;
+            margin-bottom: 10px;
+        }
+        .hero p { color: var(--green-dim); font-size: 18px; margin-bottom: 30px; }
+        .search-box {
+            max-width: 500px;
+            margin: 0 auto;
+            display: flex;
+            gap: 10px;
+        }
+        .search-box input {
+            flex: 1;
+            padding: 12px 15px;
+            font-size: 16px;
+            background: var(--bg);
+            border: 1px solid var(--green);
+            color: var(--green);
+            font-family: inherit;
+        }
+        .search-box input:focus {
+            outline: none;
+            box-shadow: 0 0 10px var(--green-glow);
+        }
+        .search-box input::placeholder { color: var(--green-dim); }
+        .search-box button, .btn {
+            padding: 12px 20px;
+            background: var(--green);
+            color: var(--bg);
+            border: none;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 16px;
+            text-transform: uppercase;
+        }
+        .search-box button:hover, .btn:hover {
+            box-shadow: 0 0 15px var(--green-glow);
+        }
+        .stats-bar {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+            margin: 30px 0;
+            padding: 15px;
+            border: 1px dashed var(--border);
+        }
+        .stat { text-align: center; padding: 10px; }
+        .stat-value {
+            font-size: 32px;
+            color: var(--green);
+            text-shadow: 0 0 10px var(--green-glow);
+        }
+        .stat-label { font-size: 12px; color: var(--green-dim); margin-top: 5px; text-transform: uppercase; }
+        .features {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+            margin: 30px 0;
+        }
+        .feature-card {
+            border: 1px solid var(--border);
+            padding: 20px;
+            text-decoration: none;
+            color: inherit;
+            transition: all 0.2s;
+            background: var(--bg);
+        }
+        .feature-card:hover {
+            border-color: var(--green);
+            box-shadow: 0 0 15px var(--green-glow);
+        }
+        .feature-card h3 {
+            color: var(--green);
+            font-size: 18px;
+            margin-bottom: 10px;
+        }
+        .feature-card h3::before { content: "> "; color: var(--green-dim); }
+        .feature-card p { color: var(--green-dim); font-size: 14px; line-height: 1.5; }
+        footer {
+            text-align: center;
+            padding: 30px 0;
+            border-top: 1px dashed var(--border);
+            margin-top: 30px;
+            color: var(--green-dim);
+            font-size: 14px;
+        }
+        .prompt::before { content: "root@kayaknet:~$ "; color: var(--green-dim); }
+        .cursor { animation: cursor-blink 1s infinite; }
+        @keyframes cursor-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="terminal-window">
+            <div class="terminal-header">
+                <span>KAYAKNET TERMINAL v1.0</span>
+                <span class="status">[CONNECTED]</span>
+            </div>
+            <div class="terminal-body">
+                <header>
+                    <a href="/" class="logo">KAYAKNET</a>
+                    <nav>
+                        <a href="/marketplace">/market</a>
+                        <a href="/chat">/chat</a>
+                        <a href="/domains">/domains</a>
+                        <a href="/network">/network</a>
+                    </nav>
+                </header>
+                
+                <div class="ascii-art">
+ _  __    _    _   _    _    _  ___   _ _____ _____
+| |/ /   / \  | \ | |  / \  | |/ / \ | | ____|_   _|
+| ' /   / _ \ |  \| | / _ \ | ' /|  \| |  _|   | |
+| . \  / ___ \| |\  |/ ___ \| . \| |\  | |___  | |
+|_|\_\/_/   \_\_| \_/_/   \_\_|\_\_| \_|_____| |_|
+        ANONYMOUS P2P NETWORK // SECURE // FREE
+                </div>
+                
+                <section class="hero">
+                    <h1>> WELCOME_</h1>
+                    <p>[ Anonymous peer-to-peer network. No servers. No tracking. No censorship. ]</p>
+                    <div class="search-box">
+                        <input type="text" id="search" placeholder="search://query..." />
+                        <button onclick="search()">EXEC</button>
+                    </div>
+                </section>
+                
+                <div class="stats-bar">
+                    <div class="stat">
+                        <div class="stat-value" id="stat-peers">0</div>
+                        <div class="stat-label">PEERS</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-value" id="stat-listings">0</div>
+                        <div class="stat-label">LISTINGS</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-value" id="stat-domains">0</div>
+                        <div class="stat-label">DOMAINS</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-value" id="stat-anonymous">--</div>
+                        <div class="stat-label">ANON_STATUS</div>
+                    </div>
+                </div>
+                
+                <section class="features">
+                    <a href="/marketplace" class="feature-card">
+                        <h3>MARKETPLACE</h3>
+                        <p>Anonymous commerce. Buy and sell without identity. Peer-to-peer transactions only.</p>
+                    </a>
+                    <a href="/chat" class="feature-card">
+                        <h3>SECURE_CHAT</h3>
+                        <p>Onion-routed messaging. End-to-end encrypted. No logs. No traces.</p>
+                    </a>
+                    <a href="/domains" class="feature-card">
+                        <h3>.KYK_DOMAINS</h3>
+                        <p>Register anonymous domains. Only resolvable inside KayakNet. Host hidden services.</p>
+                    </a>
+                    <a href="/network" class="feature-card">
+                        <h3>NET_STATUS</h3>
+                        <p>Monitor peers, relays, anonymity metrics. Real-time network health.</p>
+                    </a>
+                </section>
+                
+                <footer>
+                    <p class="prompt">system ready<span class="cursor">_</span></p>
+                    <p style="margin-top: 10px;">[ KAYAKNET // ANONYMOUS // DECENTRALIZED // FREE ]</p>
+                </footer>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        async function loadStats() {
+            try {
+                const res = await fetch('/api/stats');
+                const stats = await res.json();
+                document.getElementById('stat-peers').textContent = stats.peers || 0;
+                document.getElementById('stat-listings').textContent = stats.listings || 0;
+                document.getElementById('stat-domains').textContent = stats.domains || 0;
+                document.getElementById('stat-anonymous').textContent = stats.anonymous ? 'ACTIVE' : 'BUILD';
+            } catch(e) {}
+        }
+        function search() {
+            const query = document.getElementById('search').value;
+            if (query) window.location.href = '/marketplace?q=' + encodeURIComponent(query);
+        }
+        document.getElementById('search').addEventListener('keypress', (e) => { if (e.key === 'Enter') search(); });
+        loadStats();
+        setInterval(loadStats, 10000);
+    </script>
+</body>
+</html>`
+
+const marketplaceHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MARKET // KAYAKNET</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=VT323&display=swap');
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root { --bg: #000; --green: #00ff00; --green-dim: #00aa00; --green-glow: #00ff0066; --border: #00ff0033; }
+        body { font-family: 'VT323', monospace; background: var(--bg); color: var(--green); min-height: 100vh; }
+        body::before { content: ""; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: repeating-linear-gradient(0deg, rgba(0,0,0,0.15) 0px, rgba(0,0,0,0.15) 1px, transparent 1px, transparent 2px); pointer-events: none; z-index: 1000; }
+        .container { max-width: 1000px; margin: 0 auto; padding: 20px; }
+        .terminal { border: 1px solid var(--green); background: #0a0a0a; box-shadow: 0 0 20px var(--green-glow); }
+        .term-header { background: var(--green); color: var(--bg); padding: 5px 15px; font-size: 14px; }
+        .term-body { padding: 20px; }
+        header { display: flex; justify-content: space-between; align-items: center; padding: 15px 0; border-bottom: 1px dashed var(--border); margin-bottom: 20px; }
+        .logo { font-size: 24px; color: var(--green); text-decoration: none; text-shadow: 0 0 10px var(--green-glow); }
+        .logo::before { content: "["; } .logo::after { content: "]"; }
+        nav { display: flex; gap: 15px; }
+        nav a { color: var(--green-dim); text-decoration: none; padding: 5px 10px; border: 1px solid transparent; }
+        nav a:hover, nav a.active { color: var(--green); border-color: var(--green); }
+        h1 { font-size: 24px; margin-bottom: 20px; }
+        h1::before { content: "> "; color: var(--green-dim); }
+        .toolbar { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
+        input, select { padding: 10px; background: var(--bg); border: 1px solid var(--green); color: var(--green); font-family: inherit; font-size: 16px; }
+        input:focus, select:focus { outline: none; box-shadow: 0 0 10px var(--green-glow); }
+        select { cursor: pointer; }
+        .btn { padding: 10px 20px; background: var(--green); color: var(--bg); border: none; cursor: pointer; font-family: inherit; font-size: 16px; }
+        .btn:hover { box-shadow: 0 0 15px var(--green-glow); }
+        .listings { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 15px; }
+        .listing { border: 1px solid var(--border); padding: 15px; background: var(--bg); transition: all 0.2s; }
+        .listing:hover { border-color: var(--green); box-shadow: 0 0 10px var(--green-glow); }
+        .listing h3 { color: var(--green); margin-bottom: 10px; }
+        .listing .price { color: var(--green); font-size: 22px; margin: 10px 0; }
+        .listing .desc { color: var(--green-dim); font-size: 14px; margin-bottom: 10px; }
+        .listing .meta { color: var(--green-dim); font-size: 12px; opacity: 0.7; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="terminal">
+            <div class="term-header">KAYAKNET MARKETPLACE // ANONYMOUS COMMERCE</div>
+            <div class="term-body">
+                <header>
+                    <a href="/" class="logo">KAYAKNET</a>
+                    <nav>
+                        <a href="/marketplace" class="active">/market</a>
+                        <a href="/chat">/chat</a>
+                        <a href="/domains">/domains</a>
+                        <a href="/network">/network</a>
+                    </nav>
+                </header>
+                <h1>MARKETPLACE_</h1>
+                <div class="toolbar">
+                    <input type="text" id="search" placeholder="search://..." style="flex: 1; min-width: 200px;" />
+                    <select id="category">
+                        <option value="">ALL_CATEGORIES</option>
+                        <option value="digital">DIGITAL</option>
+                        <option value="services">SERVICES</option>
+                        <option value="other">OTHER</option>
+                    </select>
+                    <button class="btn" onclick="alert('CMD: sell [title] [price] [desc]')">+NEW</button>
+                </div>
+                <div class="listings" id="listings">
+                    <div class="listing"><h3>LOADING...</h3><p class="desc">Fetching data...</p></div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script>
+        async function loadListings() {
+            const category = document.getElementById('category').value;
+            const search = document.getElementById('search').value;
+            const res = await fetch('/api/listings?category=' + category + '&q=' + search);
+            const listings = await res.json();
+            const container = document.getElementById('listings');
+            if (!listings || listings.length === 0) {
+                container.innerHTML = '<div class="listing"><h3>NO_LISTINGS</h3><p class="desc">Be the first to list something!</p></div>';
+                return;
+            }
+            container.innerHTML = listings.map(l => '<div class="listing"><h3>' + l.title.toUpperCase() + '</h3><div class="price">' + l.price + ' ' + l.currency + '</div><p class="desc">' + (l.description || 'No description') + '</p><p class="meta">SELLER: ' + l.seller_id.substring(0, 16) + '...</p></div>').join('');
+        }
+        document.getElementById('search').addEventListener('input', loadListings);
+        document.getElementById('category').addEventListener('change', loadListings);
+        loadListings();
+    </script>
+</body>
+</html>`
+
+const chatPageHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CHAT // KAYAKNET</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=VT323&display=swap');
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root { --bg: #000; --green: #00ff00; --green-dim: #00aa00; --green-glow: #00ff0066; --border: #00ff0033; }
+        body { font-family: 'VT323', monospace; background: var(--bg); color: var(--green); height: 100vh; display: flex; flex-direction: column; }
+        body::before { content: ""; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: repeating-linear-gradient(0deg, rgba(0,0,0,0.15) 0px, rgba(0,0,0,0.15) 1px, transparent 1px, transparent 2px); pointer-events: none; z-index: 1000; }
+        .container { max-width: 1000px; margin: 0 auto; padding: 20px; width: 100%; flex: 1; display: flex; flex-direction: column; }
+        .terminal { border: 1px solid var(--green); background: #0a0a0a; box-shadow: 0 0 20px var(--green-glow); flex: 1; display: flex; flex-direction: column; }
+        .term-header { background: var(--green); color: var(--bg); padding: 5px 15px; font-size: 14px; flex-shrink: 0; }
+        .term-body { padding: 15px; flex: 1; display: flex; flex-direction: column; min-height: 0; }
+        header { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px dashed var(--border); flex-shrink: 0; }
+        .logo { font-size: 24px; color: var(--green); text-decoration: none; text-shadow: 0 0 10px var(--green-glow); }
+        .logo::before { content: "["; } .logo::after { content: "]"; }
+        nav { display: flex; gap: 15px; }
+        nav a { color: var(--green-dim); text-decoration: none; padding: 5px 10px; border: 1px solid transparent; }
+        nav a:hover, nav a.active { color: var(--green); border-color: var(--green); }
+        .chat-container { display: flex; flex: 1; margin-top: 15px; gap: 15px; min-height: 0; }
+        .rooms { width: 180px; border: 1px solid var(--border); padding: 10px; flex-shrink: 0; }
+        .rooms h3 { margin-bottom: 10px; font-size: 14px; color: var(--green-dim); }
+        .room { padding: 8px; cursor: pointer; margin-bottom: 5px; border: 1px solid transparent; }
+        .room:hover, .room.active { border-color: var(--green); color: var(--green); text-shadow: 0 0 5px var(--green-glow); }
+        .messages-container { flex: 1; display: flex; flex-direction: column; border: 1px solid var(--border); min-height: 0; }
+        .messages { flex: 1; padding: 15px; overflow-y: auto; background: var(--bg); }
+        .message { margin-bottom: 12px; font-size: 16px; }
+        .message .nick { color: var(--green); }
+        .message .nick::before { content: "<"; color: var(--green-dim); }
+        .message .nick::after { content: ">"; color: var(--green-dim); }
+        .message .time { color: var(--green-dim); font-size: 12px; margin-left: 10px; }
+        .message .content { margin-top: 3px; color: var(--green-dim); padding-left: 20px; }
+        .input-area { padding: 10px; border-top: 1px dashed var(--border); display: flex; gap: 10px; background: #0a0a0a; }
+        .input-area input { flex: 1; padding: 10px; background: var(--bg); border: 1px solid var(--green); color: var(--green); font-family: inherit; font-size: 16px; }
+        .input-area input:focus { outline: none; box-shadow: 0 0 10px var(--green-glow); }
+        .input-area button { padding: 10px 20px; background: var(--green); color: var(--bg); border: none; cursor: pointer; font-family: inherit; font-size: 16px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="terminal">
+            <div class="term-header">KAYAKNET SECURE CHAT // ONION ROUTED</div>
+            <div class="term-body">
+                <header>
+                    <a href="/" class="logo">KAYAKNET</a>
+                    <nav>
+                        <a href="/marketplace">/market</a>
+                        <a href="/chat" class="active">/chat</a>
+                        <a href="/domains">/domains</a>
+                        <a href="/network">/network</a>
+                    </nav>
+                </header>
+                <div class="chat-container">
+                    <div class="rooms">
+                        <h3>// CHANNELS</h3>
+                        <div class="room active" data-room="general">#general</div>
+                        <div class="room" data-room="trading">#trading</div>
+                        <div class="room" data-room="tech">#tech</div>
+                        <div class="room" data-room="random">#random</div>
+                    </div>
+                    <div class="messages-container">
+                        <div class="messages" id="messages">
+                            <div class="message">
+                                <span class="nick">SYSTEM</span>
+                                <span class="time">00:00</span>
+                                <div class="content">// Secure channel established. Messages are onion-routed.</div>
+                            </div>
+                        </div>
+                        <div class="input-area">
+                            <input type="text" id="message" placeholder="msg://..." />
+                            <button onclick="sendMessage()">SEND</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script>
+        let currentRoom = 'general';
+        document.querySelectorAll('.room').forEach(el => {
+            el.addEventListener('click', () => {
+                document.querySelectorAll('.room').forEach(r => r.classList.remove('active'));
+                el.classList.add('active');
+                currentRoom = el.dataset.room;
+                loadMessages();
+            });
+        });
+        async function loadMessages() {
+            const res = await fetch('/api/chat?room=' + currentRoom);
+            const messages = await res.json();
+            const container = document.getElementById('messages');
+            if (!messages || messages.length === 0) {
+                container.innerHTML = '<div class="message"><span class="nick">SYSTEM</span><div class="content">// No messages. Start transmission.</div></div>';
+                return;
+            }
+            container.innerHTML = messages.map(m => '<div class="message"><span class="nick">' + m.nick.toUpperCase() + '</span><span class="time">' + m.timestamp + '</span><div class="content">' + m.content + '</div></div>').join('');
+            container.scrollTop = container.scrollHeight;
+        }
+        async function sendMessage() {
+            const input = document.getElementById('message');
+            const message = input.value.trim();
+            if (!message) return;
+            await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'room=' + currentRoom + '&message=' + encodeURIComponent(message) });
+            input.value = '';
+            loadMessages();
+        }
+        document.getElementById('message').addEventListener('keypress', (e) => { if (e.key === 'Enter') sendMessage(); });
+        loadMessages();
+        setInterval(loadMessages, 3000);
+    </script>
+</body>
+</html>`
+
+const domainsPageHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DOMAINS // KAYAKNET</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=VT323&display=swap');
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root { --bg: #000; --green: #00ff00; --green-dim: #00aa00; --green-glow: #00ff0066; --border: #00ff0033; }
+        body { font-family: 'VT323', monospace; background: var(--bg); color: var(--green); min-height: 100vh; }
+        body::before { content: ""; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: repeating-linear-gradient(0deg, rgba(0,0,0,0.15) 0px, rgba(0,0,0,0.15) 1px, transparent 1px, transparent 2px); pointer-events: none; z-index: 1000; }
+        .container { max-width: 1000px; margin: 0 auto; padding: 20px; }
+        .terminal { border: 1px solid var(--green); background: #0a0a0a; box-shadow: 0 0 20px var(--green-glow); }
+        .term-header { background: var(--green); color: var(--bg); padding: 5px 15px; font-size: 14px; }
+        .term-body { padding: 20px; }
+        header { display: flex; justify-content: space-between; align-items: center; padding: 15px 0; border-bottom: 1px dashed var(--border); margin-bottom: 20px; }
+        .logo { font-size: 24px; color: var(--green); text-decoration: none; text-shadow: 0 0 10px var(--green-glow); }
+        .logo::before { content: "["; } .logo::after { content: "]"; }
+        nav { display: flex; gap: 15px; }
+        nav a { color: var(--green-dim); text-decoration: none; padding: 5px 10px; border: 1px solid transparent; }
+        nav a:hover, nav a.active { color: var(--green); border-color: var(--green); }
+        h1 { font-size: 24px; margin-bottom: 20px; }
+        h1::before { content: "> "; color: var(--green-dim); }
+        .search-bar { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
+        input { flex: 1; min-width: 200px; padding: 10px; background: var(--bg); border: 1px solid var(--green); color: var(--green); font-family: inherit; font-size: 16px; }
+        input:focus { outline: none; box-shadow: 0 0 10px var(--green-glow); }
+        .btn { padding: 10px 20px; background: var(--green); color: var(--bg); border: none; cursor: pointer; font-family: inherit; font-size: 16px; }
+        .btn:hover { box-shadow: 0 0 15px var(--green-glow); }
+        .domains { display: grid; gap: 10px; }
+        .domain { border: 1px solid var(--border); padding: 15px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; background: var(--bg); }
+        .domain:hover { border-color: var(--green); box-shadow: 0 0 10px var(--green-glow); }
+        .domain-name { font-size: 20px; color: var(--green); text-shadow: 0 0 5px var(--green-glow); }
+        .domain-desc { color: var(--green-dim); font-size: 14px; margin-top: 5px; }
+        .domain-owner { color: var(--green-dim); font-size: 12px; opacity: 0.7; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="terminal">
+            <div class="term-header">KAYAKNET DOMAIN REGISTRY // .KYK</div>
+            <div class="term-body">
+                <header>
+                    <a href="/" class="logo">KAYAKNET</a>
+                    <nav>
+                        <a href="/marketplace">/market</a>
+                        <a href="/chat">/chat</a>
+                        <a href="/domains" class="active">/domains</a>
+                        <a href="/network">/network</a>
+                    </nav>
+                </header>
+                <h1>.KYK_DOMAINS</h1>
+                <div class="search-bar">
+                    <input type="text" id="search" placeholder="dns://search..." />
+                    <button class="btn" onclick="alert('CMD: register [name]')">+REGISTER</button>
+                </div>
+                <div class="domains" id="domains">
+                    <div class="domain"><div><div class="domain-name">LOADING...</div><div class="domain-desc">Querying DNS...</div></div></div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script>
+        async function loadDomains() {
+            const search = document.getElementById('search').value;
+            const res = await fetch('/api/domains?q=' + search);
+            const domains = await res.json();
+            const container = document.getElementById('domains');
+            if (!domains || domains.length === 0) {
+                container.innerHTML = '<div class="domain"><div><div class="domain-name">NO_RECORDS</div><div class="domain-desc">// Register the first .kyk domain</div></div></div>';
+                return;
+            }
+            container.innerHTML = domains.map(d => '<div class="domain"><div><div class="domain-name">' + d.full_name.toUpperCase() + '</div><div class="domain-desc">' + (d.description || '// No description') + '</div></div><div class="domain-owner">OWNER: ' + d.owner.substring(0, 16) + '...</div></div>').join('');
+        }
+        document.getElementById('search').addEventListener('input', loadDomains);
+        loadDomains();
+    </script>
+</body>
+</html>`
+
+const networkPageHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NETWORK // KAYAKNET</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=VT323&display=swap');
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root { --bg: #000; --green: #00ff00; --green-dim: #00aa00; --green-glow: #00ff0066; --amber: #ffaa00; --amber-glow: #ffaa0066; --border: #00ff0033; }
+        body { font-family: 'VT323', monospace; background: var(--bg); color: var(--green); min-height: 100vh; }
+        body::before { content: ""; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: repeating-linear-gradient(0deg, rgba(0,0,0,0.15) 0px, rgba(0,0,0,0.15) 1px, transparent 1px, transparent 2px); pointer-events: none; z-index: 1000; }
+        .container { max-width: 1000px; margin: 0 auto; padding: 20px; }
+        .terminal { border: 1px solid var(--green); background: #0a0a0a; box-shadow: 0 0 20px var(--green-glow); }
+        .term-header { background: var(--green); color: var(--bg); padding: 5px 15px; font-size: 14px; }
+        .term-body { padding: 20px; }
+        header { display: flex; justify-content: space-between; align-items: center; padding: 15px 0; border-bottom: 1px dashed var(--border); margin-bottom: 20px; }
+        .logo { font-size: 24px; color: var(--green); text-decoration: none; text-shadow: 0 0 10px var(--green-glow); }
+        .logo::before { content: "["; } .logo::after { content: "]"; }
+        nav { display: flex; gap: 15px; }
+        nav a { color: var(--green-dim); text-decoration: none; padding: 5px 10px; border: 1px solid transparent; }
+        nav a:hover, nav a.active { color: var(--green); border-color: var(--green); }
+        h1 { font-size: 24px; margin-bottom: 20px; }
+        h1::before { content: "> "; color: var(--green-dim); }
+        h2 { font-size: 18px; margin: 25px 0 15px; color: var(--green-dim); }
+        h2::before { content: "// "; }
+        .status-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 30px; }
+        .status-card { border: 1px solid var(--border); padding: 20px; text-align: center; background: var(--bg); }
+        .status-card h3 { color: var(--green-dim); font-size: 12px; text-transform: uppercase; margin-bottom: 10px; }
+        .status-value { font-size: 36px; color: var(--green); text-shadow: 0 0 10px var(--green-glow); }
+        .status-value.success { color: var(--green); text-shadow: 0 0 15px var(--green-glow); }
+        .status-value.warning { color: var(--amber); text-shadow: 0 0 15px var(--amber-glow); }
+        .peers { display: grid; gap: 8px; }
+        .peer { border: 1px solid var(--border); padding: 12px 15px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; background: var(--bg); font-size: 14px; }
+        .peer:hover { border-color: var(--green); }
+        .peer-id { color: var(--green); word-break: break-all; }
+        .peer-status { color: var(--green-dim); font-size: 12px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="terminal">
+            <div class="term-header">KAYAKNET NETWORK STATUS // REAL-TIME</div>
+            <div class="term-body">
+                <header>
+                    <a href="/" class="logo">KAYAKNET</a>
+                    <nav>
+                        <a href="/marketplace">/market</a>
+                        <a href="/chat">/chat</a>
+                        <a href="/domains">/domains</a>
+                        <a href="/network" class="active">/network</a>
+                    </nav>
+                </header>
+                <h1>NETWORK_STATUS</h1>
+                <div class="status-grid">
+                    <div class="status-card">
+                        <h3>ANONYMITY</h3>
+                        <div class="status-value" id="anon-status">--</div>
+                    </div>
+                    <div class="status-card">
+                        <h3>PEERS</h3>
+                        <div class="status-value" id="peer-count">0</div>
+                    </div>
+                    <div class="status-card">
+                        <h3>RELAYS</h3>
+                        <div class="status-value" id="relay-count">0</div>
+                    </div>
+                    <div class="status-card">
+                        <h3>HOPS</h3>
+                        <div class="status-value">3</div>
+                    </div>
+                </div>
+                <h2>CONNECTED_PEERS</h2>
+                <div class="peers" id="peers">
+                    <div class="peer"><span class="peer-id">SCANNING...</span></div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script>
+        async function loadNetwork() {
+            const statsRes = await fetch('/api/stats');
+            const stats = await statsRes.json();
+            const anonEl = document.getElementById('anon-status');
+            if (stats.anonymous) {
+                anonEl.textContent = 'ACTIVE';
+                anonEl.className = 'status-value success';
+            } else {
+                anonEl.textContent = 'BUILD';
+                anonEl.className = 'status-value warning';
+            }
+            document.getElementById('peer-count').textContent = stats.peers || 0;
+            document.getElementById('relay-count').textContent = stats.relay_count || 0;
+            const peersRes = await fetch('/api/peers');
+            const peers = await peersRes.json();
+            const container = document.getElementById('peers');
+            if (!peers || peers.length === 0) {
+                container.innerHTML = '<div class="peer"><span class="peer-id">NO_PEERS_CONNECTED</span></div>';
+                return;
+            }
+            container.innerHTML = peers.map(p => '<div class="peer"><span class="peer-id">' + p.id + '</span><span class="peer-status">PING: ' + p.last_seen + '</span></div>').join('');
+        }
+        loadNetwork();
+        setInterval(loadNetwork, 5000);
+    </script>
+</body>
+</html>`

@@ -55,6 +55,10 @@ type Proxy struct {
 	cancel       context.CancelFunc
 	running      bool
 
+	// Built-in homepage
+	homepagePort int
+	homepageAddr string
+
 	// Stats
 	requestCount  int64
 	bytesIn       int64
@@ -72,12 +76,22 @@ type Config struct {
 func NewProxy(resolver NameResolver, sender MessageSender) *Proxy {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Proxy{
-		port:     DefaultProxyPort,
-		resolver: resolver,
-		sender:   sender,
-		ctx:      ctx,
-		cancel:   cancel,
+		port:         DefaultProxyPort,
+		resolver:     resolver,
+		sender:       sender,
+		ctx:          ctx,
+		cancel:       cancel,
+		homepagePort: 8080,
+		homepageAddr: "127.0.0.1:8080",
 	}
+}
+
+// SetHomepagePort sets the port where the built-in homepage is running
+func (p *Proxy) SetHomepagePort(port int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.homepagePort = port
+	p.homepageAddr = fmt.Sprintf("127.0.0.1:%d", port)
 }
 
 // Start starts the proxy servers
@@ -228,6 +242,12 @@ func (p *Proxy) handleKykRequest(conn net.Conn, req *http.Request) {
 		host = strings.Split(host, ":")[0]
 	}
 
+	// Special handling for home.kyk - route to built-in homepage
+	if host == "home.kyk" || host == "kayaknet.kyk" {
+		p.proxyToHomepage(conn, req)
+		return
+	}
+
 	// Resolve the .kyk domain
 	nodeID, _, err := p.resolver.Resolve(host)
 	if err != nil {
@@ -255,6 +275,51 @@ func (p *Proxy) handleKykRequest(conn net.Conn, req *http.Request) {
 		}
 		resp.Header.Set("Content-Type", "text/plain")
 	}
+
+	resp.Write(conn)
+	p.mu.Lock()
+	p.requestCount++
+	p.mu.Unlock()
+}
+
+// proxyToHomepage forwards requests to the built-in homepage server
+func (p *Proxy) proxyToHomepage(conn net.Conn, req *http.Request) {
+	p.mu.RLock()
+	addr := p.homepageAddr
+	p.mu.RUnlock()
+
+	// Connect to the local homepage server
+	targetConn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		resp := &http.Response{
+			StatusCode: http.StatusBadGateway,
+			ProtoMajor: 1,
+			ProtoMinor: 1,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("Homepage server not running")),
+		}
+		resp.Header.Set("Content-Type", "text/plain")
+		resp.Write(conn)
+		return
+	}
+	defer targetConn.Close()
+
+	// Modify request to target local server
+	req.Host = addr
+	req.URL.Host = addr
+
+	// Forward the request
+	if err := req.Write(targetConn); err != nil {
+		return
+	}
+
+	// Read and forward the response
+	reader := bufio.NewReader(targetConn)
+	resp, err := http.ReadResponse(reader, req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
 
 	resp.Write(conn)
 	p.mu.Lock()
