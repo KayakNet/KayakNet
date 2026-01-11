@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+      
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      
+      - name: Build Linux AMD64
+        run: |
+          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o kayakd-linux-amd64 ./cmd/kayakd
+          tar czf kayakd-${{ steps.version.outputs.VERSION }}-linux-amd64.tar.gz kayakd-linux-amd64 README.md LICENSE
+      
+      - name: Build Linux ARM64
+        run: |
+          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o kayakd-linux-arm64 ./cmd/kayakd
+          tar czf kayakd-${{ steps.version.outputs.VERSION }}-linux-arm64.tar.gz kayakd-linux-arm64 README.md LICENSE
+      
+      - name: Build macOS AMD64
+        run: |
+          GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o kayakd-darwin-amd64 ./cmd/kayakd
+          tar czf kayakd-${{ steps.version.outputs.VERSION }}-darwin-amd64.tar.gz kayakd-darwin-amd64 README.md LICENSE
+      
+      - name: Build macOS ARM64 (Apple Silicon)
+        run: |
+          GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o kayakd-darwin-arm64 ./cmd/kayakd
+          tar czf kayakd-${{ steps.version.outputs.VERSION }}-darwin-arm64.tar.gz kayakd-darwin-arm64 README.md LICENSE
+      
+      - name: Build Windows AMD64
+        run: |
+          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o kayakd-windows-amd64.exe ./cmd/kayakd
+          zip kayakd-${{ steps.version.outputs.VERSION }}-windows-amd64.zip kayakd-windows-amd64.exe README.md LICENSE
+      
+      - name: Create checksums
+        run: |
+          sha256sum *.tar.gz *.zip > checksums.txt
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            *.tar.gz
+            *.zip
+            checksums.txt
+          body: |
+            ## KayakNet ${{ steps.version.outputs.VERSION }}
+            
+            Anonymous P2P network with built-in onion routing.
+            
+            ### Quick Start
+            
+            ```bash
+            # Download and extract for your platform, then:
+            ./kayakd -i --bootstrap 203.161.33.237:4242 --name my-node
+            
+            # With browser proxy:
+            ./kayakd -i --bootstrap 203.161.33.237:4242 --proxy
+            ```
+            
+            ### Features
+            - Onion routing (3-hop anonymous circuits)
+            - Traffic analysis resistance
+            - .kyk domain system
+            - P2P marketplace
+            - Anonymous chat
+            - Browser proxy for .kyk sites
+

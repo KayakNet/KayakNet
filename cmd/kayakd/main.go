@@ -51,24 +51,24 @@ var (
 
 // Node represents a KayakNet P2P node
 type Node struct {
-	mu          sync.RWMutex
-	config      *config.Config
-	identity    *identity.Identity
-	peerStore   *peer.Store
-	dht         *dht.DHT
-	pubsub      *pubsub.PubSub
-	capStore    *cap.Store
-	onionRouter *onion.Router
-	mixer       *mix.Mixer
-	marketplace *market.Marketplace
-	chatMgr     *chat.ChatManager
-	nameService *names.NameService
+	mu           sync.RWMutex
+	config       *config.Config
+	identity     *identity.Identity
+	peerStore    *peer.Store
+	dht          *dht.DHT
+	pubsub       *pubsub.PubSub
+	capStore     *cap.Store
+	onionRouter  *onion.Router
+	mixer        *mix.Mixer
+	marketplace  *market.Marketplace
+	chatMgr      *chat.ChatManager
+	nameService  *names.NameService
 	browserProxy *proxy.Proxy
-	listener    net.PacketConn
-	connections map[string]*PeerConn
-	ctx         context.Context
-	cancel      context.CancelFunc
-	name        string
+	listener     net.PacketConn
+	connections  map[string]*PeerConn
+	ctx          context.Context
+	cancel       context.CancelFunc
+	name         string
 
 	// Security
 	rateLimiter  *security.RateLimiter
