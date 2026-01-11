@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -31,6 +32,7 @@ import (
 	"github.com/kayaknet/kayaknet/internal/names"
 	"github.com/kayaknet/kayaknet/internal/onion"
 	"github.com/kayaknet/kayaknet/internal/peer"
+	"github.com/kayaknet/kayaknet/internal/proxy"
 	"github.com/kayaknet/kayaknet/internal/pubsub"
 	"github.com/kayaknet/kayaknet/internal/security"
 )
@@ -42,6 +44,9 @@ var (
 	bootstrap   = flag.String("bootstrap", "", "Bootstrap node addresses (comma-separated)")
 	interactive = flag.Bool("i", false, "Interactive mode (CLI)")
 	nodeName    = flag.String("name", "", "Node name")
+	proxyEnable = flag.Bool("proxy", false, "Enable browser proxy (HTTP on 8118, SOCKS5 on 8119)")
+	proxyHTTP   = flag.Int("proxy-http", 8118, "HTTP proxy port")
+	proxySOCKS  = flag.Int("proxy-socks", 8119, "SOCKS5 proxy port")
 )
 
 // Node represents a KayakNet P2P node
@@ -58,6 +63,7 @@ type Node struct {
 	marketplace *market.Marketplace
 	chatMgr     *chat.ChatManager
 	nameService *names.NameService
+	browserProxy *proxy.Proxy
 	listener    net.PacketConn
 	connections map[string]*PeerConn
 	ctx         context.Context
@@ -150,6 +156,15 @@ func main() {
 	fmt.Println("║  [+] Onion routing + traffic analysis resistance           ║")
 	fmt.Println("║  [+] Padding, mixing, dummy traffic enabled                ║")
 	fmt.Println("║  [+] .kyk domains - KayakNet naming system                 ║")
+
+	// Start browser proxy if enabled
+	if *proxyEnable {
+		if err := node.browserProxy.Start(*proxyHTTP, *proxySOCKS); err != nil {
+			log.Printf("[WARN] Failed to start browser proxy: %v", err)
+		} else {
+			fmt.Printf("║  [+] Browser proxy: HTTP %d, SOCKS5 %d                 ║\n", *proxyHTTP, *proxySOCKS)
+		}
+	}
 	fmt.Println("╚════════════════════════════════════════════════════════════╝")
 
 	if *interactive {
@@ -291,12 +306,44 @@ func NewNode(cfg *config.Config, name string) (*Node, error) {
 		id.Sign,
 	)
 
+	// Create browser proxy (resolver wraps nameService)
+	resolver := &nodeNameResolver{node: n}
+	sender := &nodeMessageSender{node: n}
+	n.browserProxy = proxy.NewProxy(resolver, sender)
+
 	// Set up chat message handler
 	n.chatMgr.OnMessage(func(msg *chat.Message) {
 		fmt.Printf("\n[CHAT] [%s] %s: %s\n> ", msg.Room, msg.Nick, msg.Content)
 	})
 
 	return n, nil
+}
+
+// nodeNameResolver wraps the name service for proxy use
+type nodeNameResolver struct {
+	node *Node
+}
+
+func (r *nodeNameResolver) Resolve(domain string) (string, string, error) {
+	reg, err := r.node.nameService.Resolve(domain)
+	if err != nil {
+		return "", "", err
+	}
+	return reg.NodeID, reg.Address, nil
+}
+
+// nodeMessageSender wraps the node for proxy use
+type nodeMessageSender struct {
+	node *Node
+}
+
+func (s *nodeMessageSender) SendToNode(nodeID string, data []byte) error {
+	return s.node.sendAnonymous(nodeID, MsgTypeChat, data)
+}
+
+func (s *nodeMessageSender) SendHTTPRequest(nodeID string, req *http.Request) (*http.Response, error) {
+	// For now, return a placeholder - full implementation would tunnel HTTP through onion routing
+	return nil, fmt.Errorf("HTTP tunneling not yet implemented - use SOCKS5 proxy")
 }
 
 // Start starts the node
@@ -972,6 +1019,24 @@ func (n *Node) interactiveMode() {
 		case "info", "i":
 			n.cmdInfo()
 
+		// === BROWSER PROXY COMMANDS ===
+		case "proxy":
+			n.cmdProxy()
+		case "proxy-start":
+			httpPort := 8118
+			socksPort := 8119
+			if len(parts) > 1 {
+				httpPort, _ = strconv.Atoi(parts[1])
+			}
+			if len(parts) > 2 {
+				socksPort, _ = strconv.Atoi(parts[2])
+			}
+			n.cmdProxyStart(httpPort, socksPort)
+		case "proxy-stop":
+			n.cmdProxyStop()
+		case "proxy-setup":
+			n.cmdProxySetup()
+
 		// === SYSTEM ===
 		case "quit", "q", "exit":
 			fmt.Println("Goodbye!")
@@ -1353,40 +1418,97 @@ func (n *Node) cmdSearchDomains(query string) {
 	}
 }
 
+// === BROWSER PROXY COMMANDS ===
+
+func (n *Node) cmdProxy() {
+	if n.browserProxy.IsRunning() {
+		requests, bytesIn, bytesOut := n.browserProxy.Stats()
+		fmt.Println("\n[PROXY] Browser Proxy Status: RUNNING")
+		fmt.Printf("  HTTP Port:   127.0.0.1:%d\n", n.browserProxy.Port())
+		fmt.Printf("  SOCKS5 Port: 127.0.0.1:%d\n", n.browserProxy.Port()+1)
+		fmt.Printf("  Requests:    %d\n", requests)
+		fmt.Printf("  Bytes In:    %d\n", bytesIn)
+		fmt.Printf("  Bytes Out:   %d\n", bytesOut)
+		fmt.Println("\nBrowser can access .kyk domains when configured to use proxy")
+	} else {
+		fmt.Println("\n[PROXY] Browser Proxy Status: STOPPED")
+		fmt.Println("  Use 'proxy-start' to enable browser access")
+		fmt.Println("  Use 'proxy-setup' to see browser configuration instructions")
+	}
+}
+
+func (n *Node) cmdProxyStart(httpPort, socksPort int) {
+	if n.browserProxy.IsRunning() {
+		fmt.Println("[WARN] Proxy already running")
+		return
+	}
+
+	if err := n.browserProxy.Start(httpPort, socksPort); err != nil {
+		fmt.Printf("[ERR] Failed to start proxy: %v\n", err)
+		return
+	}
+
+	fmt.Println("[OK] Browser proxy started")
+	fmt.Printf("  HTTP Proxy:   127.0.0.1:%d\n", httpPort)
+	fmt.Printf("  SOCKS5 Proxy: 127.0.0.1:%d\n", socksPort)
+	fmt.Println("\nConfigure your browser to use these proxy settings")
+	fmt.Println("Then browse to any .kyk domain (e.g., http://example.kyk)")
+}
+
+func (n *Node) cmdProxyStop() {
+	if !n.browserProxy.IsRunning() {
+		fmt.Println("[WARN] Proxy not running")
+		return
+	}
+
+	n.browserProxy.Stop()
+	fmt.Println("[OK] Browser proxy stopped")
+}
+
+func (n *Node) cmdProxySetup() {
+	fmt.Println(proxy.ProxyInfo(8118, 8119))
+}
+
 func (n *Node) cmdHelp() {
 	fmt.Println(`
-┌─────────────────────────────────────────────────────────────┐
-│                    KayakNet Commands                         │
-├─────────────────────────────────────────────────────────────┤
-│  [CHAT] CHAT                                                     │
-│     chat <room> <msg>  - Send message to room               │
-│     rooms              - List chat rooms                     │
-│     join <room>        - Join a room                         │
-│     history <room>     - Show room history                   │
-│                                                              │
-│  [PKG] MARKETPLACE (network-only access)                        │
-│     market             - Marketplace overview                │
-│     browse [category]  - Browse all listings                 │
-│     search <query>     - Search listings                     │
-│     sell <t> <p> <d>   - Create listing                      │
-│     buy <id>           - Request to purchase                 │
-│     mylistings         - Your listings                       │
-│                                                              │
-│  [NET] DOMAINS (.kyk)                                           │
-│     register <name>    - Register a .kyk domain              │
-│     resolve <name>     - Resolve .kyk domain                 │
-│     domains            - List your domains                   │
-│     whois <name>       - Domain details                      │
-│     update-domain      - Update domain address               │
-│     search-domains     - Search domains                      │
-│                                                              │
-│  [LINK] NETWORK                                                  │
-│     peers              - List connected peers                │
-│     connect <addr>     - Connect to peer                     │
-│     status             - Anonymity status                    │
-│     info               - Node information                    │
-│                                                              │
-│  📌 quit/exit          - Exit KayakNet                       │
-└─────────────────────────────────────────────────────────────┘
++-------------------------------------------------------------+
+|                    KayakNet Commands                        |
++-------------------------------------------------------------+
+| CHAT                                                        |
+|   chat <room> <msg>  - Send message to room                 |
+|   rooms              - List chat rooms                      |
+|   join <room>        - Join a room                          |
+|   history <room>     - Show room history                    |
+|                                                             |
+| MARKETPLACE (network-only access)                           |
+|   market             - Marketplace overview                 |
+|   browse [category]  - Browse all listings                  |
+|   search <query>     - Search listings                      |
+|   sell <t> <p> <d>   - Create listing                       |
+|   buy <id>           - Request to purchase                  |
+|   mylistings         - Your listings                        |
+|                                                             |
+| DOMAINS (.kyk)                                              |
+|   register <name>    - Register a .kyk domain               |
+|   resolve <name>     - Resolve .kyk domain                  |
+|   domains            - List your domains                    |
+|   whois <name>       - Domain details                       |
+|   update-domain      - Update domain address                |
+|   search-domains     - Search domains                       |
+|                                                             |
+| BROWSER PROXY (access .kyk in browser)                      |
+|   proxy              - Proxy status                         |
+|   proxy-start        - Start browser proxy                  |
+|   proxy-stop         - Stop browser proxy                   |
+|   proxy-setup        - Browser configuration guide          |
+|                                                             |
+| NETWORK                                                     |
+|   peers              - List connected peers                 |
+|   connect <addr>     - Connect to peer                      |
+|   status             - Anonymity status                     |
+|   info               - Node information                     |
+|                                                             |
+| quit/exit            - Exit KayakNet                        |
++-------------------------------------------------------------+
 `)
 }

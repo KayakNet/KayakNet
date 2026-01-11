@@ -20,6 +20,7 @@ A privacy-first peer-to-peer network with built-in anonymity. No central servers
 - **Onion Routing**: Multi-hop encrypted routing for anonymity (like Tor)
 - **Traffic Analysis Resistance**: Padding, mixing, dummy traffic
 - **.kyk Domains**: KayakNet naming system - register `yourname.kyk`
+- **Browser Access**: Browse .kyk sites with any browser (no VPN needed)
 - **Anonymous Chat**: End-to-end encrypted group messaging
 - **P2P Marketplace**: Buy/sell within the network only
 - **Ed25519 Identity**: Cryptographic node identity
@@ -92,6 +93,63 @@ status                 # Anonymity status
 info                   # Node information
 help                   # All commands
 ```
+
+### Browser Proxy
+```
+proxy                  # Proxy status
+proxy-start            # Start browser proxy
+proxy-stop             # Stop browser proxy
+proxy-setup            # Browser configuration guide
+```
+
+## Browser Access (No VPN Required)
+
+Access .kyk domains directly in your browser by configuring a local proxy.
+
+### Start with Proxy Enabled
+
+```bash
+./kayakd -i --proxy --name my-node
+```
+
+### Or Enable at Runtime
+
+```bash
+> proxy-start
+[OK] Browser proxy started
+  HTTP Proxy:   127.0.0.1:8118
+  SOCKS5 Proxy: 127.0.0.1:8119
+```
+
+### Configure Your Browser
+
+**Firefox:**
+1. Settings > Network Settings > Settings
+2. Select "Manual proxy configuration"
+3. HTTP Proxy: `127.0.0.1` Port: `8118`
+4. Check "Also use this proxy for HTTPS"
+5. Click OK
+
+**Chrome (use Proxy SwitchyOmega extension):**
+1. Install Proxy SwitchyOmega
+2. Create new profile "KayakNet"
+3. Set HTTP/HTTPS proxy to `127.0.0.1:8118`
+4. Apply and select "KayakNet" profile
+
+**System-wide (Linux):**
+```bash
+export http_proxy=http://127.0.0.1:8118
+export https_proxy=http://127.0.0.1:8118
+```
+
+### Browse .kyk Sites
+
+After setup, navigate to any .kyk domain:
+- `http://example.kyk`
+- `http://market.kyk`
+- `http://mysite.kyk`
+
+All traffic is routed through KayakNet's onion network.
 
 ## .kyk Domains
 
