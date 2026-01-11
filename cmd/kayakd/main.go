@@ -147,9 +147,9 @@ func main() {
 	fmt.Printf("║  Address:  %-47s ║\n", *listenAddr)
 	fmt.Printf("║  Name:     %-47s ║\n", node.name)
 	fmt.Println("╠════════════════════════════════════════════════════════════╣")
-	fmt.Println("║  🔒 Onion routing + traffic analysis resistance            ║")
-	fmt.Println("║  🛡️  Padding, mixing, dummy traffic enabled                 ║")
-	fmt.Println("║  🌐 .kyk domains - KayakNet naming system                   ║")
+	fmt.Println("║  [+] Onion routing + traffic analysis resistance           ║")
+	fmt.Println("║  [+] Padding, mixing, dummy traffic enabled                ║")
+	fmt.Println("║  [+] .kyk domains - KayakNet naming system                 ║")
 	fmt.Println("╚════════════════════════════════════════════════════════════╝")
 
 	if *interactive {
@@ -293,7 +293,7 @@ func NewNode(cfg *config.Config, name string) (*Node, error) {
 
 	// Set up chat message handler
 	n.chatMgr.OnMessage(func(msg *chat.Message) {
-		fmt.Printf("\n💬 [%s] %s: %s\n> ", msg.Room, msg.Nick, msg.Content)
+		fmt.Printf("\n[CHAT] [%s] %s: %s\n> ", msg.Room, msg.Nick, msg.Content)
 	})
 
 	return n, nil
@@ -606,7 +606,7 @@ func (n *Node) handleNameReply(msg *P2PMessage) {
 	}
 
 	// Display result
-	fmt.Printf("\n🌐 Found: %s\n", reg.FullName)
+	fmt.Printf("\n[NET] Found: %s\n", reg.FullName)
 	fmt.Printf("   Owner: %s...\n", reg.NodeID[:16])
 	if reg.Description != "" {
 		fmt.Printf("   %s\n", reg.Description)
@@ -625,7 +625,7 @@ func (n *Node) handleListing(msg *P2PMessage) {
 		return
 	}
 
-	log.Printf("📦 New listing: %s", listing.Title)
+	log.Printf("[PKG] New listing: %s", listing.Title)
 }
 
 // handleOnion processes onion-routed message (relay or final destination)
@@ -796,7 +796,7 @@ func (n *Node) bootstrap() {
 			continue
 		}
 
-		log.Printf("🔗 Connecting to bootstrap: %s", addrStr)
+		log.Printf("[LINK] Connecting to bootstrap: %s", addrStr)
 		n.sendDirect(addr, MsgTypePing, []byte(`"ping"`))
 
 		time.Sleep(500 * time.Millisecond)
@@ -995,7 +995,7 @@ func (n *Node) cmdPeers() {
 		return
 	}
 
-	fmt.Printf("\n📡 Peers (%d):\n", len(n.connections))
+	fmt.Printf("\n[PEERS] Peers (%d):\n", len(n.connections))
 	for _, conn := range n.connections {
 		age := time.Since(conn.LastSeen).Round(time.Second)
 		fmt.Printf("  • %s... (seen %s ago)\n", conn.NodeID[:16], age)
@@ -1020,9 +1020,9 @@ func (n *Node) cmdChat(room, message string) {
 	count := n.broadcast(MsgTypeChat, payload)
 
 	if n.onionRouter.CanRoute() {
-		fmt.Printf("🧅 Sent anonymously to %d peers\n", count)
+		fmt.Printf("[ONION] Sent anonymously to %d peers\n", count)
 	} else {
-		fmt.Printf("📤 Sent to %d peers (need %d+ for anonymity)\n", count, onion.MinHops)
+		fmt.Printf("[SEND] Sent to %d peers (need %d+ for anonymity)\n", count, onion.MinHops)
 	}
 }
 
@@ -1039,20 +1039,20 @@ func (n *Node) cmdConnect(addrStr string) {
 	}
 
 	n.sendDirect(addr, MsgTypePing, []byte(`"ping"`))
-	fmt.Printf("🔗 Connecting to %s\n", addrStr)
+	fmt.Printf("[LINK] Connecting to %s\n", addrStr)
 }
 
 func (n *Node) cmdStatus() {
 	relays := n.onionRouter.GetRelayCount()
 
-	fmt.Println("\n🔒 Anonymity Status:")
+	fmt.Println("\n[SECURE] Anonymity Status:")
 	if relays >= onion.MinHops {
-		fmt.Printf("  ✅ ANONYMOUS - %d-hop onion routing active\n", onion.MinHops)
+		fmt.Printf("  [OK] ANONYMOUS - %d-hop onion routing active\n", onion.MinHops)
 	} else {
-		fmt.Printf("  ⚠️  Building network - need %d peers, have %d\n", onion.MinHops, relays)
+		fmt.Printf("  [WARN]  Building network - need %d peers, have %d\n", onion.MinHops, relays)
 	}
 
-	fmt.Println("\n🛡️  Traffic Analysis Defenses:")
+	fmt.Println("\n[SHIELD]  Traffic Analysis Defenses:")
 	fmt.Printf("  • Constant-rate padding: %d byte messages\n", mix.PaddingSize)
 	fmt.Printf("  • Batch mixing: every %s\n", mix.BatchInterval)
 	fmt.Printf("  • Random delays: up to %s\n", mix.MaxDelay)
@@ -1068,7 +1068,7 @@ func (n *Node) cmdInfo() {
 	totalDomains, activeDomains := n.nameService.Stats()
 	myDomains := len(n.nameService.MyDomains())
 
-	fmt.Println("\n📋 Node Info:")
+	fmt.Println("\n[INFO] Node Info:")
 	fmt.Printf("  ID:      %s\n", n.identity.NodeID())
 	fmt.Printf("  Name:    %s\n", n.name)
 	fmt.Printf("  Peers:   %d\n", peerCount)
@@ -1081,7 +1081,7 @@ func (n *Node) cmdInfo() {
 
 func (n *Node) cmdRooms() {
 	rooms := n.chatMgr.ListRooms()
-	fmt.Println("\n💬 Chat Rooms:")
+	fmt.Println("\n[CHAT] Chat Rooms:")
 	for _, room := range rooms {
 		fmt.Printf("  #%-15s %s\n", room.Name, room.Description)
 	}
@@ -1095,7 +1095,7 @@ func (n *Node) cmdHistory(room string, count int) {
 		return
 	}
 
-	fmt.Printf("\n💬 #%s (last %d messages):\n", room, len(msgs))
+	fmt.Printf("\n[CHAT] #%s (last %d messages):\n", room, len(msgs))
 	for _, msg := range msgs {
 		ts := msg.Timestamp.Format("15:04")
 		fmt.Printf("  [%s] %s: %s\n", ts, msg.Nick, msg.Content)
@@ -1106,7 +1106,7 @@ func (n *Node) cmdHistory(room string, count int) {
 
 func (n *Node) cmdMarket() {
 	listings, categories := n.marketplace.Stats()
-	fmt.Println("\n📦 KayakNet Marketplace")
+	fmt.Println("\n[PKG] KayakNet Marketplace")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Printf("  Listings:   %d\n", listings)
 	fmt.Printf("  Categories: %d\n", categories)
@@ -1125,15 +1125,15 @@ func (n *Node) cmdBrowse(category string) {
 		return
 	}
 
-	fmt.Println("\n📦 Marketplace Listings:")
+	fmt.Println("\n[PKG] Marketplace Listings:")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	for _, l := range listings {
-		rating := "★"
+		rating := "*"
 		if l.Rating > 0 {
-			rating = fmt.Sprintf("%.1f★", l.Rating)
+			rating = fmt.Sprintf("%.1f*", l.Rating)
 		}
 		fmt.Printf("  [%s] %s\n", l.ID[:8], l.Title)
-		fmt.Printf("      💰 %d %s  |  %s  |  by %s...\n", l.Price, l.Currency, rating, l.SellerID[:8])
+		fmt.Printf("       %d %s  |  %s  |  by %s...\n", l.Price, l.Currency, rating, l.SellerID[:8])
 		if l.Description != "" {
 			desc := l.Description
 			if len(desc) > 60 {
@@ -1163,7 +1163,7 @@ func (n *Node) cmdSell(title string, price int64, description string) {
 	data, _ := listing.Marshal()
 	n.broadcast(MsgTypeListing, data)
 
-	fmt.Printf("✅ Listed: %s\n", listing.Title)
+	fmt.Printf("[OK] Listed: %s\n", listing.Title)
 	fmt.Printf("   ID: %s\n", listing.ID)
 	fmt.Printf("   Price: %d credits\n", listing.Price)
 }
@@ -1189,7 +1189,7 @@ func (n *Node) cmdBuy(listingID string) {
 		return
 	}
 
-	fmt.Printf("📨 Request sent to seller\n")
+	fmt.Printf("[MSG] Request sent to seller\n")
 	fmt.Printf("   Listing: %s\n", found.Title)
 	fmt.Printf("   Request ID: %s\n", req.ID)
 	fmt.Println("   The seller will receive your anonymous request.")
@@ -1202,11 +1202,11 @@ func (n *Node) cmdMyListings() {
 		return
 	}
 
-	fmt.Println("\n📦 Your Listings:")
+	fmt.Println("\n[PKG] Your Listings:")
 	for _, l := range listings {
-		status := "✅ Active"
+		status := "[OK] Active"
 		if !l.Active {
-			status = "❌ Inactive"
+			status = "[ERR] Inactive"
 		}
 		fmt.Printf("  [%s] %s - %d %s %s\n", l.ID[:8], l.Title, l.Price, l.Currency, status)
 	}
@@ -1219,7 +1219,7 @@ func (n *Node) cmdSearch(query string) {
 		return
 	}
 
-	fmt.Printf("\n🔍 Search results for '%s':\n", query)
+	fmt.Printf("\n[SEARCH] Search results for '%s':\n", query)
 	for _, l := range listings {
 		fmt.Printf("  [%s] %s - %d %s\n", l.ID[:8], l.Title, l.Price, l.Currency)
 	}
@@ -1230,7 +1230,7 @@ func (n *Node) cmdSearch(query string) {
 func (n *Node) cmdRegister(name, description string) {
 	reg, err := n.nameService.Register(name, description, "")
 	if err != nil {
-		fmt.Printf("❌ Failed: %v\n", err)
+		fmt.Printf("[ERR] Failed: %v\n", err)
 		return
 	}
 
@@ -1238,7 +1238,7 @@ func (n *Node) cmdRegister(name, description string) {
 	data, _ := reg.Marshal()
 	n.broadcast(MsgTypeNameReg, data)
 
-	fmt.Printf("✅ Registered: %s\n", reg.FullName)
+	fmt.Printf("[OK] Registered: %s\n", reg.FullName)
 	fmt.Printf("   Owner:   %s...\n", reg.NodeID[:16])
 	fmt.Printf("   Expires: %s\n", reg.ExpiresAt.Format("2006-01-02"))
 	fmt.Println("\n   Your domain is now resolvable on KayakNet!")
@@ -1254,11 +1254,11 @@ func (n *Node) cmdResolve(domain string) {
 		// Try asking network
 		payload, _ := json.Marshal(domain)
 		n.broadcast(MsgTypeNameLookup, payload)
-		fmt.Printf("🔍 Looking up %s on network...\n", domain)
+		fmt.Printf("[SEARCH] Looking up %s on network...\n", domain)
 		return
 	}
 
-	fmt.Printf("\n🌐 %s\n", reg.FullName)
+	fmt.Printf("\n[NET] %s\n", reg.FullName)
 	fmt.Printf("   Node:    %s...\n", reg.NodeID[:16])
 	if reg.Address != "" {
 		fmt.Printf("   Address: %s\n", reg.Address)
@@ -1279,7 +1279,7 @@ func (n *Node) cmdDomains() {
 		return
 	}
 
-	fmt.Println("\n🌐 Your .kyk Domains:")
+	fmt.Println("\n[NET] Your .kyk Domains:")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	for _, reg := range domains {
 		expires := reg.ExpiresAt.Format("2006-01-02")
@@ -1297,11 +1297,11 @@ func (n *Node) cmdWhois(domain string) {
 
 	reg, err := n.nameService.Resolve(domain)
 	if err != nil {
-		fmt.Printf("❌ %s not found\n", domain)
+		fmt.Printf("[ERR] %s not found\n", domain)
 		return
 	}
 
-	fmt.Printf("\n📋 WHOIS: %s\n", reg.FullName)
+	fmt.Printf("\n[INFO] WHOIS: %s\n", reg.FullName)
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Printf("  Domain:      %s\n", reg.FullName)
 	fmt.Printf("  Owner Node:  %s\n", reg.NodeID)
@@ -1325,7 +1325,7 @@ func (n *Node) cmdUpdateDomain(name, address string) {
 	}
 
 	if err := n.nameService.Update(name, address, ""); err != nil {
-		fmt.Printf("❌ Failed: %v\n", err)
+		fmt.Printf("[ERR] Failed: %v\n", err)
 		return
 	}
 
@@ -1336,7 +1336,7 @@ func (n *Node) cmdUpdateDomain(name, address string) {
 		n.broadcast(MsgTypeNameReg, data)
 	}
 
-	fmt.Printf("✅ Updated %s%s\n", name, names.DomainSuffix)
+	fmt.Printf("[OK] Updated %s%s\n", name, names.DomainSuffix)
 	fmt.Printf("   Address: %s\n", address)
 }
 
@@ -1347,7 +1347,7 @@ func (n *Node) cmdSearchDomains(query string) {
 		return
 	}
 
-	fmt.Printf("\n🔍 Domains matching '%s':\n", query)
+	fmt.Printf("\n[SEARCH] Domains matching '%s':\n", query)
 	for _, reg := range results {
 		fmt.Printf("  %-20s - %s\n", reg.FullName, reg.Description)
 	}
@@ -1358,13 +1358,13 @@ func (n *Node) cmdHelp() {
 ┌─────────────────────────────────────────────────────────────┐
 │                    KayakNet Commands                         │
 ├─────────────────────────────────────────────────────────────┤
-│  💬 CHAT                                                     │
+│  [CHAT] CHAT                                                     │
 │     chat <room> <msg>  - Send message to room               │
 │     rooms              - List chat rooms                     │
 │     join <room>        - Join a room                         │
 │     history <room>     - Show room history                   │
 │                                                              │
-│  📦 MARKETPLACE (network-only access)                        │
+│  [PKG] MARKETPLACE (network-only access)                        │
 │     market             - Marketplace overview                │
 │     browse [category]  - Browse all listings                 │
 │     search <query>     - Search listings                     │
@@ -1372,7 +1372,7 @@ func (n *Node) cmdHelp() {
 │     buy <id>           - Request to purchase                 │
 │     mylistings         - Your listings                       │
 │                                                              │
-│  🌐 DOMAINS (.kyk)                                           │
+│  [NET] DOMAINS (.kyk)                                           │
 │     register <name>    - Register a .kyk domain              │
 │     resolve <name>     - Resolve .kyk domain                 │
 │     domains            - List your domains                   │
@@ -1380,7 +1380,7 @@ func (n *Node) cmdHelp() {
 │     update-domain      - Update domain address               │
 │     search-domains     - Search domains                      │
 │                                                              │
-│  🔗 NETWORK                                                  │
+│  [LINK] NETWORK                                                  │
 │     peers              - List connected peers                │
 │     connect <addr>     - Connect to peer                     │
 │     status             - Anonymity status                    │

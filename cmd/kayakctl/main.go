@@ -75,9 +75,9 @@ func identityCmd() *cobra.Command {
 				if err := id.Save(output); err != nil {
 					return fmt.Errorf("failed to save identity: %w", err)
 				}
-				fmt.Printf("✅ Identity saved to: %s\n", output)
+				fmt.Printf("[OK] Identity saved to: %s\n", output)
 			} else {
-				fmt.Println("⚠️  Identity not saved. Use --output to save.")
+				fmt.Println("[WARN]  Identity not saved. Use --output to save.")
 			}
 
 			return nil
@@ -180,16 +180,16 @@ func capabilityCmd() *cobra.Command {
 			}
 
 			if err := capability.Verify(); err != nil {
-				fmt.Println("❌ Invalid signature:", err)
+				fmt.Println("[ERR] Invalid signature:", err)
 				return nil
 			}
 
 			if capability.IsExpired() {
-				fmt.Println("⚠️  Capability is expired")
+				fmt.Println("[WARN]  Capability is expired")
 				return nil
 			}
 
-			fmt.Println("✅ Capability is valid")
+			fmt.Println("[OK] Capability is valid")
 			fmt.Println("   Service:    ", capability.ServiceID)
 			fmt.Println("   Permissions:", capability.Permissions)
 			fmt.Println("   Expires:    ", capability.ExpiresAt.Format(time.RFC3339))
@@ -261,7 +261,7 @@ func pingCmd() *cobra.Command {
 			}
 			json.Unmarshal(buf[:n], &resp)
 
-			fmt.Printf("✅ Pong from %s... (RTT: %s)\n", resp.From[:16], rtt.Round(time.Microsecond))
+			fmt.Printf("[OK] Pong from %s... (RTT: %s)\n", resp.From[:16], rtt.Round(time.Microsecond))
 			return nil
 		},
 	}

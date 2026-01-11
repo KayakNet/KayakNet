@@ -3,9 +3,9 @@
 A privacy-first peer-to-peer network with built-in anonymity. No central servers. No web services. Just nodes talking directly to each other through encrypted, anonymous channels.
 
 ```
-    ┌─────────┐    🧅    ┌─────────┐
-    │  Node   │◄────────►│  Node   │
-    │  Alpha  │   relay  │  Beta   │
+    ┌─────────┐         ┌─────────┐
+    │  Node   │◄───────►│  Node   │
+    │  Alpha  │  relay  │  Beta   │
     └────┬────┘         └────┬────┘
          │                   │
          │    ┌─────────┐    │
@@ -17,11 +17,11 @@ A privacy-first peer-to-peer network with built-in anonymity. No central servers
 ## Features
 
 - **Pure P2P**: Every node is equal. No servers, no central authority.
-- **🧅 Onion Routing**: Multi-hop encrypted routing for anonymity (like Tor)
-- **🛡️ Traffic Analysis Resistance**: Padding, mixing, dummy traffic
-- **🌐 .kyk Domains**: KayakNet naming system - register `yourname.kyk`
-- **💬 Anonymous Chat**: End-to-end encrypted group messaging
-- **📦 P2P Marketplace**: Buy/sell within the network only
+- **Onion Routing**: Multi-hop encrypted routing for anonymity (like Tor)
+- **Traffic Analysis Resistance**: Padding, mixing, dummy traffic
+- **.kyk Domains**: KayakNet naming system - register `yourname.kyk`
+- **Anonymous Chat**: End-to-end encrypted group messaging
+- **P2P Marketplace**: Buy/sell within the network only
 - **Ed25519 Identity**: Cryptographic node identity
 - **Kademlia DHT**: Distributed discovery of peers and services
 - **UDP Transport**: Lightweight, NAT-friendly communication
@@ -56,7 +56,7 @@ go build -o kayakctl ./cmd/kayakctl
 
 Once running with `-i` flag:
 
-### 💬 Chat
+### Chat
 ```
 chat <room> <message>   # Send anonymous message
 rooms                   # List chat rooms
@@ -64,7 +64,7 @@ join <room>            # Join a room
 history <room>         # Show room history
 ```
 
-### 📦 Marketplace (Network-Only Access)
+### Marketplace (Network-Only Access)
 ```
 market                 # Marketplace overview
 browse [category]      # Browse listings
@@ -74,7 +74,7 @@ buy <id>               # Request to purchase
 mylistings             # Your listings
 ```
 
-### 🌐 Domains (.kyk)
+### Domains (.kyk)
 ```
 register <name>        # Register yourname.kyk
 resolve <name.kyk>     # Resolve a domain
@@ -84,7 +84,7 @@ update-domain <name> <addr>  # Update address
 search-domains <query> # Search domains
 ```
 
-### 🔗 Network
+### Network
 ```
 peers                  # List connected peers
 connect <addr>         # Connect to peer
@@ -99,12 +99,12 @@ KayakNet has its own domain system - `.kyk` domains. These are only resolvable i
 
 ```bash
 > register myservice
-✅ Registered: myservice.kyk
+[OK] Registered: myservice.kyk
    Owner:   abc123def456...
    Expires: 2027-01-09
 
 > resolve somesite.kyk
-🌐 somesite.kyk
+somesite.kyk
    Node:    789xyz...
    Desc:    My anonymous service
 ```
@@ -122,8 +122,8 @@ KayakNet has its own domain system - `.kyk` domains. These are only resolvable i
 KayakNet uses built-in onion routing when enough peers are available:
 
 ```
-You → Relay 1 → Relay 2 → Relay 3 → Destination
-         ↑ Encrypted layers stripped at each hop
+You -> Relay 1 -> Relay 2 -> Relay 3 -> Destination
+         ^ Encrypted layers stripped at each hop
 ```
 
 - **3-hop circuits** minimum
@@ -146,14 +146,14 @@ KayakNet implements defenses against Global Passive Adversaries:
 
 ```bash
 > status
-🔒 Anonymity Status:
-  ✅ ANONYMOUS - 3-hop onion routing active
+Anonymity Status:
+  [OK] ANONYMOUS - 3-hop onion routing active
 
-🛡️ Traffic Analysis Defenses:
-  • Constant-rate padding: 4096 byte messages
-  • Batch mixing: every 100ms
-  • Random delays: up to 500ms
-  • Dummy traffic: 0.1 msg/sec per peer
+Traffic Analysis Defenses:
+  * Constant-rate padding: 4096 byte messages
+  * Batch mixing: every 100ms
+  * Random delays: up to 500ms
+  * Dummy traffic: 0.1 msg/sec per peer
 ```
 
 ## Using Docker
@@ -185,38 +185,38 @@ docker run -it --rm -p 4243:4242/udp kayaknet kayakd -i \
 ## Architecture
 
 ```
-┌───────────────────────────────────────────────────────────────┐
-│                      KayakNet Node                            │
-├───────────────────────────────────────────────────────────────┤
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────────────────┐│
-│  │ Chat 💬  │ │Market 📦 │ │Names 🌐 │ │ Capabilities 🔑  ││
-│  │ (Rooms)  │ │ (P2P)    │ │ (.kyk)   │ │ (Access Ctrl)    ││
-│  └──────────┘ └──────────┘ └──────────┘ └───────────────────┘│
-├───────────────────────────────────────────────────────────────┤
-│  ┌─────────────────────────────────────────────────────────┐ │
-│  │              🧅 Onion Router                            │ │
-│  │    - Multi-hop circuits                                 │ │
-│  │    - Layered encryption                                 │ │
-│  │    - Relay management                                   │ │
-│  └─────────────────────────────────────────────────────────┘ │
-├───────────────────────────────────────────────────────────────┤
-│  ┌─────────────────────────────────────────────────────────┐ │
-│  │              🛡️ Traffic Analysis Resistance             │ │
-│  │    - Padding, mixing, delays                            │ │
-│  │    - Dummy traffic, loopback cover                      │ │
-│  └─────────────────────────────────────────────────────────┘ │
-├───────────────────────────────────────────────────────────────┤
-│  ┌─────────────────────────────────────────────────────────┐ │
-│  │              DHT (Kademlia-like)                        │ │
-│  │    - Peer Discovery                                     │ │
-│  │    - Service Announcements                              │ │
-│  │    - Record Storage                                     │ │
-│  └─────────────────────────────────────────────────────────┘ │
-├───────────────────────────────────────────────────────────────┤
-│  ┌─────────────────────────────────────────────────────────┐ │
-│  │              UDP Transport (Direct)                     │ │
-│  └─────────────────────────────────────────────────────────┘ │
-└───────────────────────────────────────────────────────────────┘
++---------------------------------------------------------------+
+|                      KayakNet Node                            |
++---------------------------------------------------------------+
+|  +----------+ +----------+ +----------+ +-------------------+ |
+|  | Chat     | | Market   | | Names    | | Capabilities      | |
+|  | (Rooms)  | | (P2P)    | | (.kyk)   | | (Access Ctrl)     | |
+|  +----------+ +----------+ +----------+ +-------------------+ |
++---------------------------------------------------------------+
+|  +---------------------------------------------------------+  |
+|  |              Onion Router                               |  |
+|  |    - Multi-hop circuits                                 |  |
+|  |    - Layered encryption                                 |  |
+|  |    - Relay management                                   |  |
+|  +---------------------------------------------------------+  |
++---------------------------------------------------------------+
+|  +---------------------------------------------------------+  |
+|  |              Traffic Analysis Resistance                |  |
+|  |    - Padding, mixing, delays                            |  |
+|  |    - Dummy traffic, loopback cover                      |  |
+|  +---------------------------------------------------------+  |
++---------------------------------------------------------------+
+|  +---------------------------------------------------------+  |
+|  |              DHT (Kademlia-like)                        |  |
+|  |    - Peer Discovery                                     |  |
+|  |    - Service Announcements                              |  |
+|  |    - Record Storage                                     |  |
+|  +---------------------------------------------------------+  |
++---------------------------------------------------------------+
+|  +---------------------------------------------------------+  |
+|  |              UDP Transport (Direct)                     |  |
+|  +---------------------------------------------------------+  |
++---------------------------------------------------------------+
 ```
 
 ## Message Protocol
