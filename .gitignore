@@ -1,6 +1,6 @@
-# Binaries
-kayakd
-kayakctl
+# Binaries (root level only)
+/kayakd
+/kayakctl
 *.exe
 *.exe~
 *.dll
