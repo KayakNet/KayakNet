@@ -1,0 +1,50 @@
+# Binaries
+kayakd
+kayakctl
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of go coverage
+*.out
+
+# Go workspace
+go.work
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data directories
+data/
+*.json
+!package.json
+!tsconfig.json
+!config.example.json
+
+# Logs
+*.log
+
+# Build
+/bin/
+/dist/
+
+# Docker
+.docker/
+
+# Temporary files
+tmp/
+temp/
+

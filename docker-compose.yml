@@ -1,0 +1,109 @@
+version: '3.8'
+
+# KayakNet - Pure P2P Network
+# This docker-compose runs multiple P2P nodes for testing
+
+services:
+  # Bootstrap node (first node in the network)
+  bootstrap:
+    build:
+      context: .
+      dockerfile: cmd/kayakd/Dockerfile
+    container_name: kayak-bootstrap
+    ports:
+      - "4242:4242/udp"
+    volumes:
+      - ./data/bootstrap:/data
+    command: >
+      kayakd
+      --data-dir /data
+      --listen 0.0.0.0:4242
+      --name bootstrap-node
+      -i
+    stdin_open: true
+    tty: true
+    networks:
+      kayaknet:
+        ipv4_address: 172.20.0.10
+
+  # Node 1
+  node1:
+    build:
+      context: .
+      dockerfile: cmd/kayakd/Dockerfile
+    container_name: kayak-node1
+    ports:
+      - "4243:4242/udp"
+    volumes:
+      - ./data/node1:/data
+    command: >
+      kayakd
+      --data-dir /data
+      --listen 0.0.0.0:4242
+      --name node-alpha
+      --bootstrap 172.20.0.10:4242
+      -i
+    stdin_open: true
+    tty: true
+    depends_on:
+      - bootstrap
+    networks:
+      kayaknet:
+        ipv4_address: 172.20.0.11
+
+  # Node 2
+  node2:
+    build:
+      context: .
+      dockerfile: cmd/kayakd/Dockerfile
+    container_name: kayak-node2
+    ports:
+      - "4244:4242/udp"
+    volumes:
+      - ./data/node2:/data
+    command: >
+      kayakd
+      --data-dir /data
+      --listen 0.0.0.0:4242
+      --name node-beta
+      --bootstrap 172.20.0.10:4242
+      -i
+    stdin_open: true
+    tty: true
+    depends_on:
+      - bootstrap
+    networks:
+      kayaknet:
+        ipv4_address: 172.20.0.12
+
+  # Node 3
+  node3:
+    build:
+      context: .
+      dockerfile: cmd/kayakd/Dockerfile
+    container_name: kayak-node3
+    ports:
+      - "4245:4242/udp"
+    volumes:
+      - ./data/node3:/data
+    command: >
+      kayakd
+      --data-dir /data
+      --listen 0.0.0.0:4242
+      --name node-gamma
+      --bootstrap 172.20.0.10:4242
+      -i
+    stdin_open: true
+    tty: true
+    depends_on:
+      - bootstrap
+    networks:
+      kayaknet:
+        ipv4_address: 172.20.0.13
+
+networks:
+  kayaknet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
