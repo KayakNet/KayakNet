@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -144,6 +145,8 @@ func (h *Homepage) Start(port int) error {
 	mux.HandleFunc("/", h.handleHome)
 	mux.HandleFunc("/api/search", h.handleSearch)
 	mux.HandleFunc("/api/listings", h.handleListings)
+	mux.HandleFunc("/api/reviews", h.handleReviews)
+	mux.HandleFunc("/api/seller", h.handleSeller)
 	mux.HandleFunc("/api/chat", h.handleChat)
 	mux.HandleFunc("/api/domains", h.handleDomains)
 	mux.HandleFunc("/api/peers", h.handlePeers)
@@ -327,8 +330,49 @@ func populateSampleListings(m *market.Marketplace) {
 
 	for _, s := range samples {
 		m.AddSampleListing(s.title, s.desc, s.category, s.price, s.currency, s.image, s.seller, s.sellerID)
+		
+		// Add seller profile
+		m.AddSampleProfile(s.sellerID, s.seller, 
+			"Trusted seller on KayakNet. Fast shipping, great communication.",
+			int64(500+rand.Intn(5000)), 
+			3.5+float64(rand.Intn(15))/10.0,
+			int64(10+rand.Intn(100)))
 	}
-	log.Printf("[MARKET] Added %d sample listings", len(samples))
+	
+	// Add sample reviews
+	sampleReviews := []struct {
+		buyer   string
+		rating  int
+		comment string
+	}{
+		{"SilentBuyer", 5, "Excellent service! Fast delivery and exactly as described. Will buy again."},
+		{"CryptoNomad", 5, "Perfect transaction. Seller was very responsive and helpful."},
+		{"AnonUser42", 4, "Good product, shipping took a bit longer than expected but seller kept me updated."},
+		{"DarknetVet", 5, "Top seller! Been buying from them for months. Always reliable."},
+		{"PrivacyFirst", 4, "Solid product. Would recommend to others looking for privacy tools."},
+		{"SecureSeeker", 5, "Amazing quality and the seller went above and beyond to help me set it up."},
+		{"GhostRunner", 4, "Good experience overall. Product works as advertised."},
+		{"ShadowBuyer", 5, "Fast shipping, great communication. A++ seller!"},
+		{"VPNLover", 4, "Works great. Had a small issue but seller resolved it quickly."},
+		{"TorUser99", 5, "Best purchase I've made on KayakNet. Highly recommended!"},
+	}
+	
+	// Add reviews to random listings
+	listings := m.Browse("")
+	for i, listing := range listings {
+		if i >= len(sampleReviews) {
+			break
+		}
+		review := sampleReviews[i%len(sampleReviews)]
+		m.AddSampleReview(listing.ID, listing.SellerID, review.buyer, review.rating, review.comment)
+		// Add a couple more reviews per listing
+		if i+3 < len(sampleReviews) {
+			m.AddSampleReview(listing.ID, listing.SellerID, sampleReviews[(i+3)%len(sampleReviews)].buyer, 
+				sampleReviews[(i+3)%len(sampleReviews)].rating, sampleReviews[(i+3)%len(sampleReviews)].comment)
+		}
+	}
+	
+	log.Printf("[MARKET] Added %d sample listings with reviews and profiles", len(samples))
 }
 
 func main() {
@@ -1807,28 +1851,112 @@ func (h *Homepage) handleListings(w http.ResponseWriter, r *http.Request) {
 		} else {
 			results = h.node.marketplace.Browse(category)
 		}
-		
+
 		for _, l := range results {
 			listings = append(listings, map[string]interface{}{
-				"id":          l.ID,
-				"title":       l.Title,
-				"description": l.Description,
-				"price":       l.Price,
-				"currency":    l.Currency,
-				"image":       l.Image,
-				"seller_id":   l.SellerID,
-				"seller_name": l.SellerName,
-				"category":    l.Category,
-				"rating":      l.Rating,
+				"id":           l.ID,
+				"title":        l.Title,
+				"description":  l.Description,
+				"price":        l.Price,
+				"currency":     l.Currency,
+				"image":        l.Image,
+				"seller_id":    l.SellerID,
+				"seller_name":  l.SellerName,
+				"category":     l.Category,
+				"rating":       l.Rating,
 				"review_count": l.ReviewCount,
-				"views":       l.Views,
-				"created_at":  l.CreatedAt.Format(time.RFC3339),
+				"views":        l.Views,
+				"created_at":   l.CreatedAt.Format(time.RFC3339),
 			})
 		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(listings)
+}
+
+func (h *Homepage) handleReviews(w http.ResponseWriter, r *http.Request) {
+	listingID := r.URL.Query().Get("listing")
+	sellerID := r.URL.Query().Get("seller")
+	var reviews []map[string]interface{}
+
+	if h.node != nil {
+		var results []*market.Review
+		if listingID != "" {
+			results = h.node.marketplace.GetReviews(listingID)
+		} else if sellerID != "" {
+			results = h.node.marketplace.GetSellerReviews(sellerID)
+		}
+
+		for _, r := range results {
+			reviews = append(reviews, map[string]interface{}{
+				"id":            r.ID,
+				"listing_id":    r.ListingID,
+				"buyer_id":      r.BuyerID,
+				"buyer_name":    r.BuyerName,
+				"rating":        r.Rating,
+				"comment":       r.Comment,
+				"quality":       r.Quality,
+				"shipping":      r.Shipping,
+				"communication": r.Communication,
+				"created_at":    r.CreatedAt.Format(time.RFC3339),
+				"verified":      r.Verified,
+				"seller_reply":  r.SellerReply,
+			})
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(reviews)
+}
+
+func (h *Homepage) handleSeller(w http.ResponseWriter, r *http.Request) {
+	sellerID := r.URL.Query().Get("id")
+	
+	if h.node == nil || sellerID == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{})
+		return
+	}
+
+	profile, err := h.node.marketplace.GetProfile(sellerID)
+	if err != nil {
+		// Create a basic profile from listings if not found
+		listings := h.node.marketplace.GetSellerListings(sellerID)
+		if len(listings) > 0 {
+			profile = &market.SellerProfile{
+				ID:       sellerID,
+				Name:     listings[0].SellerName,
+				JoinedAt: listings[0].CreatedAt,
+			}
+		} else {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{})
+			return
+		}
+	}
+
+	result := map[string]interface{}{
+		"id":             profile.ID,
+		"name":           profile.Name,
+		"bio":            profile.Bio,
+		"avatar":         profile.Avatar,
+		"joined_at":      profile.JoinedAt.Format(time.RFC3339),
+		"last_seen":      profile.LastSeen.Format(time.RFC3339),
+		"verified":       profile.Verified,
+		"trusted_seller": profile.TrustedSeller,
+		"total_sales":    profile.TotalSales,
+		"total_orders":   profile.TotalOrders,
+		"rating":         profile.Rating,
+		"review_count":   profile.ReviewCount,
+		"response_time":  profile.ResponseTime,
+		"ship_time":      profile.ShipTime,
+		"dispute_rate":   profile.DisputeRate,
+		"badges":         profile.Badges,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
 }
 
 func (h *Homepage) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -2268,120 +2396,530 @@ const marketplaceHTML = `<!DOCTYPE html>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=VT323&display=swap');
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        :root { --bg: #000; --green: #00ff00; --green-dim: #00aa00; --green-glow: #00ff0066; --border: #00ff0033; --amber: #ffaa00; }
+        :root { --bg: #000; --bg2: #0a0a0a; --green: #00ff00; --green-dim: #00aa00; --green-glow: #00ff0066; --border: #00ff0033; --amber: #ffaa00; --red: #ff3333; --blue: #33aaff; }
         body { font-family: 'VT323', monospace; background: var(--bg); color: var(--green); min-height: 100vh; }
         body::before { content: ""; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: repeating-linear-gradient(0deg, rgba(0,0,0,0.15) 0px, rgba(0,0,0,0.15) 1px, transparent 1px, transparent 2px); pointer-events: none; z-index: 1000; }
-        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
-        .terminal { border: 1px solid var(--green); background: #0a0a0a; box-shadow: 0 0 20px var(--green-glow); }
-        .term-header { background: var(--green); color: var(--bg); padding: 5px 15px; font-size: 14px; }
+        .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+        .terminal { border: 1px solid var(--green); background: var(--bg2); box-shadow: 0 0 20px var(--green-glow); }
+        .term-header { background: var(--green); color: var(--bg); padding: 5px 15px; font-size: 14px; display: flex; justify-content: space-between; }
         .term-body { padding: 20px; }
         header { display: flex; justify-content: space-between; align-items: center; padding: 15px 0; border-bottom: 1px dashed var(--border); margin-bottom: 20px; }
         .logo { font-size: 24px; color: var(--green); text-decoration: none; text-shadow: 0 0 10px var(--green-glow); }
         .logo::before { content: "["; } .logo::after { content: "]"; }
-        nav { display: flex; gap: 15px; }
+        nav { display: flex; gap: 15px; align-items: center; }
         nav a { color: var(--green-dim); text-decoration: none; padding: 5px 10px; border: 1px solid transparent; }
         nav a:hover, nav a.active { color: var(--green); border-color: var(--green); }
-        h1 { font-size: 24px; margin-bottom: 20px; }
-        h1::before { content: "> "; color: var(--green-dim); }
-        .toolbar { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
-        input, select { padding: 10px; background: var(--bg); border: 1px solid var(--green); color: var(--green); font-family: inherit; font-size: 16px; }
-        input:focus, select:focus { outline: none; box-shadow: 0 0 10px var(--green-glow); }
-        input::placeholder { color: var(--green-dim); }
-        select { cursor: pointer; }
-        .btn { padding: 10px 20px; background: var(--green); color: var(--bg); border: none; cursor: pointer; font-family: inherit; font-size: 16px; }
+        .nav-badge { background: var(--red); color: #fff; padding: 2px 6px; font-size: 12px; margin-left: 5px; }
+        h1, h2, h3 { margin-bottom: 15px; }
+        h1::before, h2::before { content: "> "; color: var(--green-dim); }
+        .tabs { display: flex; gap: 5px; margin-bottom: 20px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+        .tab { padding: 10px 20px; background: transparent; border: 1px solid var(--border); color: var(--green-dim); cursor: pointer; font-family: inherit; font-size: 16px; }
+        .tab:hover, .tab.active { background: var(--border); color: var(--green); border-color: var(--green); }
+        .toolbar { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; align-items: center; }
+        input, select, textarea { padding: 10px; background: var(--bg); border: 1px solid var(--green); color: var(--green); font-family: inherit; font-size: 16px; }
+        input:focus, select:focus, textarea:focus { outline: none; box-shadow: 0 0 10px var(--green-glow); }
+        input::placeholder, textarea::placeholder { color: var(--green-dim); }
+        textarea { resize: vertical; min-height: 80px; }
+        .btn { padding: 10px 20px; background: var(--green); color: var(--bg); border: none; cursor: pointer; font-family: inherit; font-size: 16px; transition: all 0.2s; }
         .btn:hover { box-shadow: 0 0 15px var(--green-glow); }
-        .stats { display: flex; gap: 20px; margin-bottom: 20px; font-size: 14px; color: var(--green-dim); }
-        .listings { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 20px; }
-        .listing { border: 1px solid var(--border); background: var(--bg); transition: all 0.3s; overflow: hidden; }
+        .btn-outline { background: transparent; border: 1px solid var(--green); color: var(--green); }
+        .btn-danger { background: var(--red); }
+        .btn-sm { padding: 5px 10px; font-size: 14px; }
+        .stats { display: flex; gap: 20px; margin-bottom: 20px; font-size: 14px; color: var(--green-dim); flex-wrap: wrap; }
+        .stat-box { border: 1px solid var(--border); padding: 10px 15px; }
+        .stat-box .value { font-size: 24px; color: var(--green); }
+        .listings { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 20px; }
+        .listing { border: 1px solid var(--border); background: var(--bg); transition: all 0.3s; overflow: hidden; cursor: pointer; position: relative; }
         .listing:hover { border-color: var(--green); box-shadow: 0 0 20px var(--green-glow); transform: translateY(-2px); }
         .listing-img { width: 100%; height: 180px; object-fit: cover; border-bottom: 1px solid var(--border); filter: grayscale(30%) brightness(0.9); }
         .listing:hover .listing-img { filter: grayscale(0%) brightness(1); }
         .listing-content { padding: 15px; }
         .listing h3 { color: var(--green); margin-bottom: 8px; font-size: 18px; }
-        .listing .price { color: var(--amber); font-size: 24px; margin: 10px 0; text-shadow: 0 0 10px var(--amber); }
-        .listing .price.free { color: var(--green); text-shadow: 0 0 10px var(--green-glow); }
+        .listing .price { color: var(--amber); font-size: 24px; margin: 10px 0; text-shadow: 0 0 10px rgba(255,170,0,0.5); }
+        .listing .price.free { color: var(--green); }
         .listing .desc { color: var(--green-dim); font-size: 14px; margin-bottom: 12px; line-height: 1.4; max-height: 60px; overflow: hidden; }
-        .listing .meta { display: flex; justify-content: space-between; align-items: center; border-top: 1px dashed var(--border); padding-top: 10px; margin-top: 10px; }
-        .listing .seller { color: var(--green); font-size: 14px; }
+        .listing .meta { display: flex; justify-content: space-between; align-items: center; border-top: 1px dashed var(--border); padding-top: 10px; margin-top: 10px; font-size: 14px; }
+        .listing .seller { color: var(--green); cursor: pointer; }
+        .listing .seller:hover { text-decoration: underline; }
         .listing .seller::before { content: "@"; color: var(--green-dim); }
-        .listing .rating { color: var(--amber); font-size: 14px; }
+        .listing .rating { color: var(--amber); }
         .listing .category { background: var(--border); color: var(--green); padding: 2px 8px; font-size: 12px; display: inline-block; margin-bottom: 8px; }
+        .listing .fav-btn { position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,0.7); border: 1px solid var(--green); color: var(--green); width: 30px; height: 30px; cursor: pointer; font-size: 16px; }
+        .listing .fav-btn:hover, .listing .fav-btn.active { background: var(--green); color: var(--bg); }
+        .badge { display: inline-block; padding: 2px 8px; font-size: 12px; margin-right: 5px; }
+        .badge-trusted { background: var(--amber); color: var(--bg); }
+        .badge-verified { background: var(--green); color: var(--bg); }
+        .badge-new { background: var(--blue); color: var(--bg); }
+        /* Modal */
+        .modal { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.9); z-index: 2000; overflow-y: auto; padding: 20px; }
+        .modal.active { display: flex; justify-content: center; align-items: flex-start; }
+        .modal-content { background: var(--bg2); border: 1px solid var(--green); max-width: 900px; width: 100%; margin: 20px auto; box-shadow: 0 0 30px var(--green-glow); }
+        .modal-header { background: var(--green); color: var(--bg); padding: 10px 20px; display: flex; justify-content: space-between; align-items: center; }
+        .modal-close { background: none; border: none; color: var(--bg); font-size: 24px; cursor: pointer; }
+        .modal-body { padding: 20px; }
+        .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .detail-img { width: 100%; height: 300px; object-fit: cover; border: 1px solid var(--border); }
+        .detail-info h2 { font-size: 28px; margin-bottom: 10px; }
+        .detail-price { font-size: 36px; color: var(--amber); margin: 15px 0; }
+        .detail-seller { padding: 15px; border: 1px solid var(--border); margin: 15px 0; }
+        .detail-seller-name { font-size: 20px; color: var(--green); cursor: pointer; }
+        .detail-seller-stats { display: flex; gap: 20px; margin-top: 10px; font-size: 14px; color: var(--green-dim); }
+        .detail-actions { display: flex; gap: 10px; margin-top: 20px; }
+        .reviews-section { margin-top: 30px; border-top: 1px solid var(--border); padding-top: 20px; }
+        .review { border: 1px solid var(--border); padding: 15px; margin-bottom: 10px; }
+        .review-header { display: flex; justify-content: space-between; margin-bottom: 10px; }
+        .review-user { color: var(--green); }
+        .review-rating { color: var(--amber); }
+        .review-date { color: var(--green-dim); font-size: 12px; }
+        .review-text { color: var(--green-dim); line-height: 1.5; }
+        .review-reply { background: var(--border); padding: 10px; margin-top: 10px; border-left: 2px solid var(--green); }
+        .stars { color: var(--amber); letter-spacing: 2px; }
+        /* Orders */
+        .order { border: 1px solid var(--border); padding: 15px; margin-bottom: 15px; }
+        .order-header { display: flex; justify-content: space-between; margin-bottom: 10px; }
+        .order-status { padding: 3px 10px; font-size: 14px; }
+        .order-status.pending { background: var(--amber); color: var(--bg); }
+        .order-status.completed { background: var(--green); color: var(--bg); }
+        .order-status.disputed { background: var(--red); color: #fff; }
+        /* Messages */
+        .conversation { border: 1px solid var(--border); padding: 15px; margin-bottom: 10px; cursor: pointer; }
+        .conversation:hover { border-color: var(--green); }
+        .conversation-header { display: flex; justify-content: space-between; }
+        .conversation .unread { background: var(--red); color: #fff; padding: 2px 8px; font-size: 12px; }
+        .message { padding: 10px; margin: 5px 0; max-width: 70%; }
+        .message.sent { background: var(--green); color: var(--bg); margin-left: auto; }
+        .message.received { background: var(--border); }
+        .message-time { font-size: 10px; opacity: 0.7; margin-top: 5px; }
+        @media (max-width: 768px) {
+            .detail-grid { grid-template-columns: 1fr; }
+            .listings { grid-template-columns: 1fr; }
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="terminal">
-            <div class="term-header">KAYAKNET MARKETPLACE // ANONYMOUS P2P COMMERCE</div>
+            <div class="term-header">
+                <span>KAYAKNET MARKETPLACE // ANONYMOUS P2P COMMERCE</span>
+                <span id="unread-badge"></span>
+            </div>
             <div class="term-body">
                 <header>
                     <a href="/" class="logo">KAYAKNET</a>
                     <nav>
                         <a href="/marketplace" class="active">/market</a>
+                        <a href="#" onclick="showTab('messages')">/messages<span id="msg-count"></span></a>
+                        <a href="#" onclick="showTab('orders')">/orders</a>
+                        <a href="#" onclick="showTab('favorites')">/saved</a>
                         <a href="/chat">/chat</a>
-                        <a href="/domains">/domains</a>
                         <a href="/network">/network</a>
                     </nav>
                 </header>
-                <h1>MARKETPLACE_</h1>
-                <div class="stats" id="stats">LOADING STATS...</div>
-                <div class="toolbar">
-                    <input type="text" id="search" placeholder="SEARCH://..." style="flex: 1; min-width: 200px;" />
-                    <select id="category">
-                        <option value="">ALL_CATEGORIES</option>
+                
+                <div class="tabs">
+                    <button class="tab active" onclick="showTab('browse')">BROWSE</button>
+                    <button class="tab" onclick="showTab('my-listings')">MY_LISTINGS</button>
+                    <button class="tab" onclick="showTab('orders')">ORDERS</button>
+                    <button class="tab" onclick="showTab('messages')">MESSAGES</button>
+                    <button class="tab" onclick="showTab('favorites')">FAVORITES</button>
+                </div>
+                
+                <!-- Browse Tab -->
+                <div id="tab-browse" class="tab-content">
+                    <div class="stats" id="stats">LOADING...</div>
+                    <div class="toolbar">
+                        <input type="text" id="search" placeholder="SEARCH://..." style="flex: 1; min-width: 200px;" />
+                        <select id="category">
+                            <option value="">ALL_CATEGORIES</option>
+                            <option value="software">SOFTWARE</option>
+                            <option value="services">SERVICES</option>
+                            <option value="consulting">CONSULTING</option>
+                            <option value="development">DEVELOPMENT</option>
+                            <option value="education">EDUCATION</option>
+                            <option value="hardware">HARDWARE</option>
+                        </select>
+                        <select id="sort">
+                            <option value="newest">NEWEST</option>
+                            <option value="price_asc">PRICE: LOW-HIGH</option>
+                            <option value="price_desc">PRICE: HIGH-LOW</option>
+                            <option value="rating">TOP RATED</option>
+                            <option value="popular">MOST POPULAR</option>
+                        </select>
+                        <button class="btn" onclick="showCreateListing()">+ NEW LISTING</button>
+                    </div>
+                    <div class="listings" id="listings"></div>
+                </div>
+                
+                <!-- My Listings Tab -->
+                <div id="tab-my-listings" class="tab-content" style="display:none;">
+                    <h2>MY_LISTINGS</h2>
+                    <div id="my-listings"></div>
+                </div>
+                
+                <!-- Orders Tab -->
+                <div id="tab-orders" class="tab-content" style="display:none;">
+                    <h2>ORDERS</h2>
+                    <div class="tabs">
+                        <button class="tab active" onclick="loadOrders('buying')">PURCHASES</button>
+                        <button class="tab" onclick="loadOrders('selling')">SALES</button>
+                    </div>
+                    <div id="orders-list"></div>
+                </div>
+                
+                <!-- Messages Tab -->
+                <div id="tab-messages" class="tab-content" style="display:none;">
+                    <h2>MESSAGES</h2>
+                    <div id="conversations-list"></div>
+                </div>
+                
+                <!-- Favorites Tab -->
+                <div id="tab-favorites" class="tab-content" style="display:none;">
+                    <h2>SAVED_LISTINGS</h2>
+                    <div class="listings" id="favorites-list"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Listing Detail Modal -->
+    <div id="listing-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <span>LISTING_DETAILS</span>
+                <button class="modal-close" onclick="closeModal('listing-modal')">&times;</button>
+            </div>
+            <div class="modal-body" id="listing-detail"></div>
+        </div>
+    </div>
+    
+    <!-- Seller Profile Modal -->
+    <div id="seller-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <span>SELLER_PROFILE</span>
+                <button class="modal-close" onclick="closeModal('seller-modal')">&times;</button>
+            </div>
+            <div class="modal-body" id="seller-detail"></div>
+        </div>
+    </div>
+    
+    <!-- Order Modal -->
+    <div id="order-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <span>PLACE_ORDER</span>
+                <button class="modal-close" onclick="closeModal('order-modal')">&times;</button>
+            </div>
+            <div class="modal-body" id="order-form"></div>
+        </div>
+    </div>
+    
+    <!-- Message Modal -->
+    <div id="message-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <span>CONVERSATION</span>
+                <button class="modal-close" onclick="closeModal('message-modal')">&times;</button>
+            </div>
+            <div class="modal-body" id="message-thread"></div>
+        </div>
+    </div>
+    
+    <!-- Create Listing Modal -->
+    <div id="create-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <span>CREATE_LISTING</span>
+                <button class="modal-close" onclick="closeModal('create-modal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form onsubmit="createListing(event)">
+                    <div style="margin-bottom:15px"><label>TITLE:</label><br><input type="text" id="new-title" required style="width:100%"></div>
+                    <div style="margin-bottom:15px"><label>CATEGORY:</label><br><select id="new-category" style="width:100%">
                         <option value="software">SOFTWARE</option>
                         <option value="services">SERVICES</option>
                         <option value="consulting">CONSULTING</option>
                         <option value="development">DEVELOPMENT</option>
                         <option value="education">EDUCATION</option>
                         <option value="hardware">HARDWARE</option>
-                    </select>
-                    <button class="btn" onclick="alert('Use CLI: sell [title] [price] [desc]')">+ LIST ITEM</button>
-                </div>
-                <div class="listings" id="listings">
-                    <div class="listing"><div class="listing-content"><h3>LOADING...</h3><p class="desc">Fetching data from network...</p></div></div>
-                </div>
+                    </select></div>
+                    <div style="margin-bottom:15px"><label>PRICE (KNT):</label><br><input type="number" id="new-price" min="0" required style="width:100%"></div>
+                    <div style="margin-bottom:15px"><label>DESCRIPTION:</label><br><textarea id="new-desc" required style="width:100%"></textarea></div>
+                    <div style="margin-bottom:15px"><label>IMAGE URL:</label><br><input type="text" id="new-image" placeholder="https://..." style="width:100%"></div>
+                    <button type="submit" class="btn">CREATE LISTING</button>
+                </form>
             </div>
         </div>
     </div>
+    
+    <!-- Review Modal -->
+    <div id="review-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <span>LEAVE_REVIEW</span>
+                <button class="modal-close" onclick="closeModal('review-modal')">&times;</button>
+            </div>
+            <div class="modal-body" id="review-form"></div>
+        </div>
+    </div>
+    
     <script>
+        let currentListing = null;
+        let favorites = new Set();
+        
+        function showTab(tab) {
+            document.querySelectorAll('.tab-content').forEach(t => t.style.display = 'none');
+            document.querySelectorAll('.tabs .tab').forEach(t => t.classList.remove('active'));
+            document.getElementById('tab-' + tab).style.display = 'block';
+            event?.target?.classList?.add('active');
+            
+            if (tab === 'orders') loadOrders('buying');
+            if (tab === 'messages') loadConversations();
+            if (tab === 'favorites') loadFavorites();
+            if (tab === 'my-listings') loadMyListings();
+        }
+        
+        function showModal(id) { document.getElementById(id).classList.add('active'); }
+        function closeModal(id) { document.getElementById(id).classList.remove('active'); }
+        
         async function loadListings() {
             const category = document.getElementById('category').value;
             const search = document.getElementById('search').value;
-            const res = await fetch('/api/listings?category=' + category + '&q=' + search);
+            const sort = document.getElementById('sort').value;
+            const res = await fetch('/api/listings?category=' + category + '&q=' + search + '&sort=' + sort);
             const listings = await res.json();
             const container = document.getElementById('listings');
             
-            // Update stats
             const statsRes = await fetch('/api/stats');
             const stats = await statsRes.json();
-            document.getElementById('stats').innerHTML = 'LISTINGS: ' + stats.marketplace_listings + ' | CATEGORIES: ' + stats.marketplace_categories + ' | NETWORK: SECURE';
+            document.getElementById('stats').innerHTML = 
+                '<div class="stat-box"><div class="value">' + (stats.marketplace_listings || 0) + '</div>LISTINGS</div>' +
+                '<div class="stat-box"><div class="value">' + (stats.marketplace_categories || 0) + '</div>CATEGORIES</div>' +
+                '<div class="stat-box"><div class="value">SECURE</div>ESCROW</div>';
             
             if (!listings || listings.length === 0) {
-                container.innerHTML = '<div class="listing"><div class="listing-content"><h3>NO_LISTINGS_FOUND</h3><p class="desc">No items match your search. Try different keywords or browse all categories.</p></div></div>';
+                container.innerHTML = '<div class="listing"><div class="listing-content"><h3>NO_LISTINGS</h3><p class="desc">No items found.</p></div></div>';
                 return;
             }
-            container.innerHTML = listings.map(l => {
-                const priceClass = l.price === 0 ? 'price free' : 'price';
-                const priceText = l.price === 0 ? 'FREE' : l.price + ' ' + (l.currency || 'KNT');
-                const imgUrl = l.image || 'https://picsum.photos/seed/' + l.id + '/400/300';
-                const sellerName = l.seller_name || 'anonymous';
-                const rating = l.rating ? l.rating.toFixed(1) : '-';
-                const catDisplay = (l.category || 'misc').toUpperCase();
-                return '<div class="listing">' +
-                    '<img class="listing-img" src="' + imgUrl + '" alt="' + l.title + '" onerror="this.style.display=\'none\'">' +
-                    '<div class="listing-content">' +
-                    '<span class="category">' + catDisplay + '</span>' +
-                    '<h3>' + l.title.toUpperCase() + '</h3>' +
-                    '<div class="' + priceClass + '">' + priceText + '</div>' +
-                    '<p class="desc">' + (l.description || 'No description available') + '</p>' +
-                    '<div class="meta">' +
-                    '<span class="seller">' + sellerName + '</span>' +
-                    '<span class="rating">' + rating + ' RATING</span>' +
-                    '</div></div></div>';
-            }).join('');
+            container.innerHTML = listings.map(l => renderListing(l)).join('');
         }
+        
+        function renderListing(l) {
+            const priceClass = l.price === 0 ? 'price free' : 'price';
+            const priceText = l.price === 0 ? 'FREE' : l.price + ' ' + (l.currency || 'KNT');
+            const imgUrl = l.image || 'https://picsum.photos/seed/' + l.id + '/400/300';
+            const sellerName = l.seller_name || 'anonymous';
+            const rating = l.rating ? l.rating.toFixed(1) : '-';
+            const stars = l.rating ? '★'.repeat(Math.round(l.rating)) + '☆'.repeat(5-Math.round(l.rating)) : '';
+            const isFav = favorites.has(l.id) ? 'active' : '';
+            return '<div class="listing" onclick="showListing(\'' + l.id + '\')">' +
+                '<button class="fav-btn ' + isFav + '" onclick="event.stopPropagation();toggleFav(\'' + l.id + '\')">♥</button>' +
+                '<img class="listing-img" src="' + imgUrl + '" onerror="this.style.display=\'none\'">' +
+                '<div class="listing-content">' +
+                '<span class="category">' + (l.category || 'misc').toUpperCase() + '</span>' +
+                '<h3>' + l.title.toUpperCase() + '</h3>' +
+                '<div class="' + priceClass + '">' + priceText + '</div>' +
+                '<p class="desc">' + (l.description || '') + '</p>' +
+                '<div class="meta">' +
+                '<span class="seller" onclick="event.stopPropagation();showSeller(\'' + l.seller_id + '\')">@' + sellerName + '</span>' +
+                '<span class="rating"><span class="stars">' + stars + '</span> ' + rating + '</span>' +
+                '</div></div></div>';
+        }
+        
+        async function showListing(id) {
+            const res = await fetch('/api/listings');
+            const listings = await res.json();
+            const l = listings.find(x => x.id === id);
+            if (!l) return;
+            currentListing = l;
+            
+            const imgUrl = l.image || 'https://picsum.photos/seed/' + l.id + '/400/300';
+            const priceText = l.price === 0 ? 'FREE' : l.price + ' ' + (l.currency || 'KNT');
+            const stars = l.rating ? '★'.repeat(Math.round(l.rating)) + '☆'.repeat(5-Math.round(l.rating)) : '☆☆☆☆☆';
+            
+            document.getElementById('listing-detail').innerHTML = 
+                '<div class="detail-grid">' +
+                '<div><img class="detail-img" src="' + imgUrl + '"></div>' +
+                '<div class="detail-info">' +
+                '<span class="category">' + (l.category || 'misc').toUpperCase() + '</span>' +
+                '<h2>' + l.title + '</h2>' +
+                '<div class="detail-price">' + priceText + '</div>' +
+                '<p style="color:var(--green-dim);line-height:1.6">' + (l.description || '') + '</p>' +
+                '<div class="detail-seller">' +
+                '<div class="detail-seller-name" onclick="showSeller(\'' + l.seller_id + '\')">@' + (l.seller_name || 'anonymous') + '</div>' +
+                '<div class="detail-seller-stats">' +
+                '<span><span class="stars">' + stars + '</span> ' + (l.rating?.toFixed(1) || '-') + '</span>' +
+                '<span>' + (l.review_count || 0) + ' reviews</span>' +
+                '<span>' + (l.purchases || 0) + ' sales</span>' +
+                '</div></div>' +
+                '<div class="detail-actions">' +
+                '<button class="btn" onclick="showOrderForm(\'' + l.id + '\')">BUY NOW</button>' +
+                '<button class="btn btn-outline" onclick="showMessageForm(\'' + l.seller_id + '\', \'' + l.id + '\')">MESSAGE SELLER</button>' +
+                '<button class="btn btn-outline" onclick="toggleFav(\'' + l.id + '\')">♥ SAVE</button>' +
+                '</div></div></div>' +
+                '<div class="reviews-section"><h3>REVIEWS (' + (l.review_count || 0) + ')</h3><div id="reviews-list">Loading...</div></div>';
+            
+            showModal('listing-modal');
+            loadReviews(l.id);
+        }
+        
+        async function loadReviews(listingId) {
+            const res = await fetch('/api/reviews?listing=' + listingId);
+            const reviews = await res.json();
+            const container = document.getElementById('reviews-list');
+            
+            if (!reviews || reviews.length === 0) {
+                container.innerHTML = '<p style="color:var(--green-dim)">No reviews yet.</p>';
+                return;
+            }
+            
+            container.innerHTML = reviews.map(r => 
+                '<div class="review">' +
+                '<div class="review-header">' +
+                '<span class="review-user">@' + (r.buyer_name || 'anonymous') + (r.verified ? ' <span class="badge badge-verified">VERIFIED</span>' : '') + '</span>' +
+                '<span class="review-rating"><span class="stars">' + '★'.repeat(r.rating) + '☆'.repeat(5-r.rating) + '</span></span>' +
+                '</div>' +
+                '<p class="review-text">' + r.comment + '</p>' +
+                '<div class="review-date">' + new Date(r.created_at).toLocaleDateString() + '</div>' +
+                (r.seller_reply ? '<div class="review-reply"><strong>SELLER:</strong> ' + r.seller_reply + '</div>' : '') +
+                '</div>'
+            ).join('');
+        }
+        
+        async function showSeller(sellerId) {
+            const res = await fetch('/api/seller?id=' + sellerId);
+            const seller = await res.json();
+            
+            const stars = seller.rating ? '★'.repeat(Math.round(seller.rating)) + '☆'.repeat(5-Math.round(seller.rating)) : '☆☆☆☆☆';
+            const badges = [];
+            if (seller.trusted_seller) badges.push('<span class="badge badge-trusted">TRUSTED</span>');
+            if (seller.verified) badges.push('<span class="badge badge-verified">VERIFIED</span>');
+            
+            document.getElementById('seller-detail').innerHTML =
+                '<div style="text-align:center;padding:20px;border:1px solid var(--border);margin-bottom:20px">' +
+                '<div style="font-size:48px;color:var(--green)">@</div>' +
+                '<h2>' + (seller.name || 'anonymous') + '</h2>' +
+                '<div>' + badges.join(' ') + '</div>' +
+                '<p style="color:var(--green-dim);margin:10px 0">' + (seller.bio || 'No bio') + '</p>' +
+                '</div>' +
+                '<div class="stats">' +
+                '<div class="stat-box"><div class="value">' + stars + '</div>RATING</div>' +
+                '<div class="stat-box"><div class="value">' + (seller.total_orders || 0) + '</div>SALES</div>' +
+                '<div class="stat-box"><div class="value">' + (seller.review_count || 0) + '</div>REVIEWS</div>' +
+                '<div class="stat-box"><div class="value">' + (seller.response_time || 'N/A') + '</div>RESPONSE</div>' +
+                '</div>' +
+                '<h3>LISTINGS BY THIS SELLER</h3>' +
+                '<div class="listings" id="seller-listings">Loading...</div>';
+            
+            showModal('seller-modal');
+            loadSellerListings(sellerId);
+        }
+        
+        async function loadSellerListings(sellerId) {
+            const res = await fetch('/api/listings?seller=' + sellerId);
+            const listings = await res.json();
+            document.getElementById('seller-listings').innerHTML = 
+                (listings && listings.length > 0) ? listings.map(l => renderListing(l)).join('') : '<p>No listings</p>';
+        }
+        
+        function showOrderForm(listingId) {
+            document.getElementById('order-form').innerHTML =
+                '<form onsubmit="placeOrder(event, \'' + listingId + '\')">' +
+                '<div style="margin-bottom:15px"><label>QUANTITY:</label><br><input type="number" id="order-qty" value="1" min="1" style="width:100%"></div>' +
+                '<div style="margin-bottom:15px"><label>MESSAGE TO SELLER:</label><br><textarea id="order-msg" placeholder="Any special requests..." style="width:100%"></textarea></div>' +
+                '<div style="margin-bottom:15px"><label>DELIVERY ADDRESS (encrypted):</label><br><textarea id="order-addr" placeholder="Your delivery details..." style="width:100%"></textarea></div>' +
+                '<div style="padding:15px;border:1px solid var(--amber);margin-bottom:15px;color:var(--amber)">' +
+                'ESCROW: Funds will be held securely until you confirm receipt.' +
+                '</div>' +
+                '<button type="submit" class="btn">PLACE ORDER</button>' +
+                '</form>';
+            closeModal('listing-modal');
+            showModal('order-modal');
+        }
+        
+        async function placeOrder(e, listingId) {
+            e.preventDefault();
+            alert('Order placed! In a real implementation, this would create an order with escrow.');
+            closeModal('order-modal');
+        }
+        
+        function showMessageForm(sellerId, listingId) {
+            document.getElementById('message-thread').innerHTML =
+                '<div id="msg-history" style="max-height:300px;overflow-y:auto;margin-bottom:15px;padding:10px;border:1px solid var(--border)"></div>' +
+                '<form onsubmit="sendMessage(event, \'' + sellerId + '\', \'' + listingId + '\')">' +
+                '<textarea id="msg-content" placeholder="Type your message..." style="width:100%;margin-bottom:10px"></textarea>' +
+                '<button type="submit" class="btn">SEND MESSAGE</button>' +
+                '</form>';
+            showModal('message-modal');
+        }
+        
+        async function sendMessage(e, sellerId, listingId) {
+            e.preventDefault();
+            const content = document.getElementById('msg-content').value;
+            if (!content) return;
+            alert('Message sent! In production, this would send via encrypted P2P messaging.');
+            document.getElementById('msg-content').value = '';
+        }
+        
+        async function loadOrders(type) {
+            document.getElementById('orders-list').innerHTML = 
+                '<div class="order">' +
+                '<div class="order-header">' +
+                '<span>No orders yet</span>' +
+                '</div>' +
+                '<p style="color:var(--green-dim)">Your ' + type + ' orders will appear here.</p>' +
+                '</div>';
+        }
+        
+        async function loadConversations() {
+            document.getElementById('conversations-list').innerHTML =
+                '<div class="conversation">' +
+                '<div class="conversation-header">' +
+                '<span>No messages yet</span>' +
+                '</div>' +
+                '<p style="color:var(--green-dim)">Start a conversation by messaging a seller.</p>' +
+                '</div>';
+        }
+        
+        async function loadFavorites() {
+            const container = document.getElementById('favorites-list');
+            if (favorites.size === 0) {
+                container.innerHTML = '<p style="color:var(--green-dim)">No saved listings. Click ♥ on any listing to save it.</p>';
+                return;
+            }
+            const res = await fetch('/api/listings');
+            const listings = await res.json();
+            const favListings = listings.filter(l => favorites.has(l.id));
+            container.innerHTML = favListings.length > 0 ? favListings.map(l => renderListing(l)).join('') : '<p>No saved listings</p>';
+        }
+        
+        async function loadMyListings() {
+            document.getElementById('my-listings').innerHTML =
+                '<p style="color:var(--green-dim)">Your listings will appear here. Use the CLI to create listings: sell [title] [price] [description]</p>';
+        }
+        
+        function toggleFav(id) {
+            if (favorites.has(id)) {
+                favorites.delete(id);
+            } else {
+                favorites.add(id);
+            }
+            loadListings();
+        }
+        
+        function showCreateListing() {
+            showModal('create-modal');
+        }
+        
+        async function createListing(e) {
+            e.preventDefault();
+            alert('Listing created! In production, this would broadcast to the network.');
+            closeModal('create-modal');
+        }
+        
         document.getElementById('search').addEventListener('input', loadListings);
         document.getElementById('category').addEventListener('change', loadListings);
+        document.getElementById('sort').addEventListener('change', loadListings);
         loadListings();
     </script>
 </body>
