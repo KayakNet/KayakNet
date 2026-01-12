@@ -147,6 +147,8 @@ func (h *Homepage) Start(port int) error {
 	mux.HandleFunc("/api/listings", h.handleListings)
 	mux.HandleFunc("/api/reviews", h.handleReviews)
 	mux.HandleFunc("/api/seller", h.handleSeller)
+	mux.HandleFunc("/api/create-listing", h.handleCreateListing)
+	mux.HandleFunc("/api/my-listings", h.handleMyListings)
 	mux.HandleFunc("/api/chat", h.handleChat)
 	mux.HandleFunc("/api/domains", h.handleDomains)
 	mux.HandleFunc("/api/peers", h.handlePeers)
@@ -330,15 +332,15 @@ func populateSampleListings(m *market.Marketplace) {
 
 	for _, s := range samples {
 		m.AddSampleListing(s.title, s.desc, s.category, s.price, s.currency, s.image, s.seller, s.sellerID)
-		
+
 		// Add seller profile
-		m.AddSampleProfile(s.sellerID, s.seller, 
+		m.AddSampleProfile(s.sellerID, s.seller,
 			"Trusted seller on KayakNet. Fast shipping, great communication.",
-			int64(500+rand.Intn(5000)), 
+			int64(500+rand.Intn(5000)),
 			3.5+float64(rand.Intn(15))/10.0,
 			int64(10+rand.Intn(100)))
 	}
-	
+
 	// Add sample reviews
 	sampleReviews := []struct {
 		buyer   string
@@ -356,7 +358,7 @@ func populateSampleListings(m *market.Marketplace) {
 		{"VPNLover", 4, "Works great. Had a small issue but seller resolved it quickly."},
 		{"TorUser99", 5, "Best purchase I've made on KayakNet. Highly recommended!"},
 	}
-	
+
 	// Add reviews to random listings
 	listings := m.Browse("")
 	for i, listing := range listings {
@@ -367,11 +369,11 @@ func populateSampleListings(m *market.Marketplace) {
 		m.AddSampleReview(listing.ID, listing.SellerID, review.buyer, review.rating, review.comment)
 		// Add a couple more reviews per listing
 		if i+3 < len(sampleReviews) {
-			m.AddSampleReview(listing.ID, listing.SellerID, sampleReviews[(i+3)%len(sampleReviews)].buyer, 
+			m.AddSampleReview(listing.ID, listing.SellerID, sampleReviews[(i+3)%len(sampleReviews)].buyer,
 				sampleReviews[(i+3)%len(sampleReviews)].rating, sampleReviews[(i+3)%len(sampleReviews)].comment)
 		}
 	}
-	
+
 	log.Printf("[MARKET] Added %d sample listings with reviews and profiles", len(samples))
 }
 
@@ -1106,6 +1108,18 @@ func (n *Node) broadcast(msgType byte, payload []byte) int {
 		}
 	}
 	return count
+}
+
+// broadcastListing broadcasts a marketplace listing to all peers
+func (n *Node) broadcastListing(listing *market.Listing) {
+	data, err := listing.Marshal()
+	if err != nil {
+		log.Printf("[MARKET] Failed to marshal listing: %v", err)
+		return
+	}
+
+	count := n.broadcast(MsgTypeListing, data)
+	log.Printf("[MARKET] Broadcast listing '%s' to %d peers", listing.Title, count)
 }
 
 // bootstrap connects to bootstrap nodes
@@ -1908,6 +1922,101 @@ func (h *Homepage) handleReviews(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(reviews)
+}
+
+func (h *Homepage) handleCreateListing(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.node == nil {
+		http.Error(w, "Node not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Parse form data
+	title := r.FormValue("title")
+	category := r.FormValue("category")
+	priceStr := r.FormValue("price")
+	description := r.FormValue("description")
+	image := r.FormValue("image")
+
+	if title == "" {
+		http.Error(w, "Title is required", http.StatusBadRequest)
+		return
+	}
+
+	price, _ := strconv.ParseInt(priceStr, 10, 64)
+	if price < 0 {
+		price = 0
+	}
+
+	// Get seller name from node config or use default
+	sellerName := h.node.marketplace.GetLocalName()
+	if sellerName == "" || sellerName == "anonymous" {
+		if h.node.name != "" {
+			sellerName = h.node.name
+		} else {
+			sellerName = "anonymous"
+		}
+	}
+
+	// Create the listing
+	listing, err := h.node.marketplace.CreateListingFull(
+		title,
+		description,
+		category,
+		price,
+		"KNT",
+		image,
+		sellerName,
+		30*24*time.Hour, // 30 days TTL
+	)
+
+	if err != nil {
+		http.Error(w, "Failed to create listing: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Broadcast to network
+	go h.node.broadcastListing(listing)
+
+	// Return success
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"id":      listing.ID,
+		"title":   listing.Title,
+		"message": "Listing created and broadcast to network",
+	})
+}
+
+func (h *Homepage) handleMyListings(w http.ResponseWriter, r *http.Request) {
+	var listings []map[string]interface{}
+
+	if h.node != nil {
+		for _, l := range h.node.marketplace.GetMyListings() {
+			listings = append(listings, map[string]interface{}{
+				"id":           l.ID,
+				"title":        l.Title,
+				"description":  l.Description,
+				"price":        l.Price,
+				"currency":     l.Currency,
+				"image":        l.Image,
+				"seller_id":    l.SellerID,
+				"seller_name":  l.SellerName,
+				"category":     l.Category,
+				"rating":       l.Rating,
+				"review_count": l.ReviewCount,
+				"views":        l.Views,
+				"created_at":   l.CreatedAt.Format(time.RFC3339),
+			})
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(listings)
 }
 
 func (h *Homepage) handleSeller(w http.ResponseWriter, r *http.Request) {
@@ -2894,8 +3003,15 @@ const marketplaceHTML = `<!DOCTYPE html>
         }
         
         async function loadMyListings() {
-            document.getElementById('my-listings').innerHTML =
-                '<p style="color:var(--green-dim)">Your listings will appear here. Use the CLI to create listings: sell [title] [price] [description]</p>';
+            const res = await fetch('/api/my-listings');
+            const listings = await res.json();
+            const container = document.getElementById('my-listings');
+            
+            if (!listings || listings.length === 0) {
+                container.innerHTML = '<p style="color:var(--green-dim)">You have no listings yet. Click "+ NEW LISTING" to create one.</p>';
+                return;
+            }
+            container.innerHTML = '<div class="listings">' + listings.map(l => renderListing(l)).join('') + '</div>';
         }
         
         function toggleFav(id) {
@@ -2913,8 +3029,44 @@ const marketplaceHTML = `<!DOCTYPE html>
         
         async function createListing(e) {
             e.preventDefault();
-            alert('Listing created! In production, this would broadcast to the network.');
-            closeModal('create-modal');
+            const title = document.getElementById('new-title').value;
+            const category = document.getElementById('new-category').value;
+            const price = document.getElementById('new-price').value;
+            const desc = document.getElementById('new-desc').value;
+            const image = document.getElementById('new-image').value;
+            
+            const formData = new FormData();
+            formData.append('title', title);
+            formData.append('category', category);
+            formData.append('price', price);
+            formData.append('description', desc);
+            formData.append('image', image);
+            
+            try {
+                const res = await fetch('/api/create-listing', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (res.ok) {
+                    const result = await res.json();
+                    alert('Listing created and broadcast to ' + (result.message || 'network') + '!');
+                    closeModal('create-modal');
+                    // Clear form
+                    document.getElementById('new-title').value = '';
+                    document.getElementById('new-price').value = '';
+                    document.getElementById('new-desc').value = '';
+                    document.getElementById('new-image').value = '';
+                    // Reload listings
+                    loadListings();
+                    loadMyListings();
+                } else {
+                    const err = await res.text();
+                    alert('Failed to create listing: ' + err);
+                }
+            } catch (err) {
+                alert('Error: ' + err.message);
+            }
         }
         
         document.getElementById('search').addEventListener('input', loadListings);
