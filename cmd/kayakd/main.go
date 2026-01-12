@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/ed25519"
+	crand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -27,6 +28,7 @@ import (
 	"github.com/kayaknet/kayaknet/internal/chat"
 	"github.com/kayaknet/kayaknet/internal/config"
 	"github.com/kayaknet/kayaknet/internal/dht"
+	"github.com/kayaknet/kayaknet/internal/escrow"
 	"github.com/kayaknet/kayaknet/internal/identity"
 	"github.com/kayaknet/kayaknet/internal/market"
 	"github.com/kayaknet/kayaknet/internal/mix"
@@ -66,6 +68,8 @@ type Node struct {
 	nameService  *names.NameService
 	browserProxy *proxy.Proxy
 	homepage     *Homepage
+	escrowMgr    *escrow.EscrowManager
+	cryptoWallet *escrow.CryptoWallet
 	listener     net.PacketConn
 	connections  map[string]*PeerConn
 	ctx          context.Context
@@ -149,6 +153,13 @@ func (h *Homepage) Start(port int) error {
 	mux.HandleFunc("/api/seller", h.handleSeller)
 	mux.HandleFunc("/api/create-listing", h.handleCreateListing)
 	mux.HandleFunc("/api/my-listings", h.handleMyListings)
+	mux.HandleFunc("/api/escrow/create", h.handleEscrowCreate)
+	mux.HandleFunc("/api/escrow/status", h.handleEscrowStatus)
+	mux.HandleFunc("/api/escrow/pay", h.handleEscrowPay)
+	mux.HandleFunc("/api/escrow/ship", h.handleEscrowShip)
+	mux.HandleFunc("/api/escrow/release", h.handleEscrowRelease)
+	mux.HandleFunc("/api/escrow/dispute", h.handleEscrowDispute)
+	mux.HandleFunc("/api/escrow/my", h.handleMyEscrows)
 	mux.HandleFunc("/api/chat", h.handleChat)
 	mux.HandleFunc("/api/domains", h.handleDomains)
 	mux.HandleFunc("/api/peers", h.handlePeers)
@@ -591,6 +602,30 @@ func NewNode(cfg *config.Config, name string) (*Node, error) {
 
 	// Create homepage (served at home.kyk and kayaknet.kyk)
 	n.homepage = NewHomepage(n)
+
+	// Create cryptocurrency wallet and escrow manager
+	// Configure with RPC endpoints if available (will work in demo mode otherwise)
+	walletConfig := escrow.WalletConfig{
+		MoneroRPCHost: "", // Set to "127.0.0.1:18082" if running monerod
+		ZcashRPCHost:  "", // Set to "127.0.0.1:8232" if running zcashd
+	}
+	n.cryptoWallet = escrow.NewCryptoWallet(walletConfig)
+	n.escrowMgr = escrow.NewEscrowManager(n.cryptoWallet, 2.0) // 2% platform fee
+	
+	// Start escrow maintenance goroutine
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-n.ctx.Done():
+				return
+			case <-ticker.C:
+				n.escrowMgr.ProcessAutoReleases()
+				n.escrowMgr.ProcessExpiredEscrows()
+			}
+		}
+	}()
 
 	// Set up chat message handler
 	n.chatMgr.OnMessage(func(msg *chat.Message) {
@@ -2019,9 +2054,299 @@ func (h *Homepage) handleMyListings(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(listings)
 }
 
+// =====================
+// ESCROW API HANDLERS
+// =====================
+
+func (h *Homepage) handleEscrowCreate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.node == nil {
+		http.Error(w, "Node not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Parse parameters
+	listingID := r.FormValue("listing_id")
+	currency := r.FormValue("currency") // XMR or ZEC
+	buyerAddress := r.FormValue("buyer_address")
+	deliveryInfo := r.FormValue("delivery_info")
+
+	if listingID == "" || currency == "" {
+		http.Error(w, "Missing required fields", http.StatusBadRequest)
+		return
+	}
+
+	// Get listing details
+	listing, err := h.node.marketplace.GetListing(listingID)
+	if err != nil {
+		http.Error(w, "Listing not found", http.StatusNotFound)
+		return
+	}
+
+	// Validate currency
+	cryptoType := escrow.CryptoType(currency)
+	if cryptoType != escrow.CryptoXMR && cryptoType != escrow.CryptoZEC {
+		http.Error(w, "Invalid currency. Use XMR or ZEC", http.StatusBadRequest)
+		return
+	}
+
+	// Convert price to crypto amount (simplified - in production, use real exchange rates)
+	var cryptoAmount float64
+	rate, _ := escrow.GetExchangeRate(cryptoType)
+	if rate > 0 {
+		cryptoAmount = float64(listing.Price) / rate // Assuming price is in USD-equivalent
+	} else {
+		cryptoAmount = float64(listing.Price) / 100 // Fallback
+	}
+
+	// Get seller's address (in production, this would be stored with the listing)
+	sellerAddress := ""
+	
+	// Create escrow
+	params := escrow.EscrowParams{
+		OrderID:       generateOrderID(),
+		ListingID:     listingID,
+		ListingTitle:  listing.Title,
+		BuyerID:       h.node.identity.NodeID(),
+		BuyerAddress:  buyerAddress,
+		SellerID:      listing.SellerID,
+		SellerAddress: sellerAddress,
+		Currency:      cryptoType,
+		Amount:        cryptoAmount,
+		DeliveryInfo:  deliveryInfo,
+	}
+
+	esc, err := h.node.escrowMgr.CreateEscrow(params)
+	if err != nil {
+		http.Error(w, "Failed to create escrow: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Return escrow details with payment address
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":         true,
+		"escrow_id":       esc.ID,
+		"order_id":        esc.OrderID,
+		"payment_address": esc.EscrowAddress,
+		"amount":          esc.Amount,
+		"currency":        esc.Currency,
+		"fee_percent":     esc.FeePercent,
+		"fee_amount":      esc.FeeAmount,
+		"expires_at":      esc.ExpiresAt.Format(time.RFC3339),
+		"message":         fmt.Sprintf("Send %.8f %s to the payment address", esc.Amount, esc.Currency),
+	})
+}
+
+func (h *Homepage) handleEscrowStatus(w http.ResponseWriter, r *http.Request) {
+	escrowID := r.URL.Query().Get("id")
+	orderID := r.URL.Query().Get("order_id")
+
+	if h.node == nil {
+		http.Error(w, "Node not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	var esc *escrow.Escrow
+	var err error
+
+	if escrowID != "" {
+		esc, err = h.node.escrowMgr.GetEscrow(escrowID)
+	} else if orderID != "" {
+		esc, err = h.node.escrowMgr.GetEscrowByOrder(orderID)
+	} else {
+		http.Error(w, "Escrow ID or Order ID required", http.StatusBadRequest)
+		return
+	}
+
+	if err != nil {
+		http.Error(w, "Escrow not found", http.StatusNotFound)
+		return
+	}
+
+	// Check for payment if still in created state
+	if esc.State == escrow.StateCreated {
+		h.node.escrowMgr.CheckPayment(esc.ID)
+		// Refresh escrow data
+		esc, _ = h.node.escrowMgr.GetEscrow(esc.ID)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"escrow_id":       esc.ID,
+		"order_id":        esc.OrderID,
+		"listing_id":      esc.ListingID,
+		"listing_title":   esc.ListingTitle,
+		"buyer_id":        esc.BuyerID,
+		"seller_id":       esc.SellerID,
+		"currency":        esc.Currency,
+		"amount":          esc.Amount,
+		"payment_address": esc.EscrowAddress,
+		"tx_id":           esc.TxID,
+		"state":           esc.State,
+		"created_at":      esc.CreatedAt.Format(time.RFC3339),
+		"funded_at":       esc.FundedAt.Format(time.RFC3339),
+		"shipped_at":      esc.ShippedAt.Format(time.RFC3339),
+		"expires_at":      esc.ExpiresAt.Format(time.RFC3339),
+		"auto_release_at": esc.AutoReleaseAt.Format(time.RFC3339),
+		"tracking_info":   esc.TrackingInfo,
+		"messages":        esc.Messages,
+	})
+}
+
+func (h *Homepage) handleEscrowPay(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	escrowID := r.FormValue("escrow_id")
+	
+	if h.node == nil || escrowID == "" {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	// Simulate payment received (for demo mode)
+	err := h.node.escrowMgr.MarkPaymentReceived(escrowID)
+	if err != nil {
+		http.Error(w, "Failed to mark payment: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "Payment received and confirmed. Funds are now in escrow.",
+	})
+}
+
+func (h *Homepage) handleEscrowShip(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	escrowID := r.FormValue("escrow_id")
+	trackingInfo := r.FormValue("tracking_info")
+	
+	if h.node == nil || escrowID == "" {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	err := h.node.escrowMgr.MarkShipped(escrowID, trackingInfo)
+	if err != nil {
+		http.Error(w, "Failed to mark shipped: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "Order marked as shipped. Buyer can now confirm receipt.",
+	})
+}
+
+func (h *Homepage) handleEscrowRelease(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	escrowID := r.FormValue("escrow_id")
+	
+	if h.node == nil || escrowID == "" {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	err := h.node.escrowMgr.Release(escrowID)
+	if err != nil {
+		http.Error(w, "Failed to release: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "Funds released to seller. Transaction complete!",
+	})
+}
+
+func (h *Homepage) handleEscrowDispute(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	escrowID := r.FormValue("escrow_id")
+	reason := r.FormValue("reason")
+	
+	if h.node == nil || escrowID == "" || reason == "" {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	err := h.node.escrowMgr.OpenDispute(escrowID, reason)
+	if err != nil {
+		http.Error(w, "Failed to open dispute: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "Dispute opened. Funds are frozen until resolution.",
+	})
+}
+
+func (h *Homepage) handleMyEscrows(w http.ResponseWriter, r *http.Request) {
+	if h.node == nil {
+		http.Error(w, "Node not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	role := r.URL.Query().Get("role") // "buyer" or "seller"
+	
+	var escrows []*escrow.Escrow
+	if role == "seller" {
+		escrows = h.node.escrowMgr.GetSellerEscrows(h.node.identity.NodeID())
+	} else {
+		escrows = h.node.escrowMgr.GetBuyerEscrows(h.node.identity.NodeID())
+	}
+
+	var results []map[string]interface{}
+	for _, e := range escrows {
+		results = append(results, map[string]interface{}{
+			"escrow_id":     e.ID,
+			"order_id":      e.OrderID,
+			"listing_id":    e.ListingID,
+			"listing_title": e.ListingTitle,
+			"currency":      e.Currency,
+			"amount":        e.Amount,
+			"state":         e.State,
+			"created_at":    e.CreatedAt.Format(time.RFC3339),
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(results)
+}
+
+func generateOrderID() string {
+	b := make([]byte, 16)
+	crand.Read(b)
+	return hex.EncodeToString(b)
+}
+
 func (h *Homepage) handleSeller(w http.ResponseWriter, r *http.Request) {
 	sellerID := r.URL.Query().Get("id")
-	
+
 	if h.node == nil || sellerID == "" {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{})
@@ -2934,13 +3259,23 @@ const marketplaceHTML = `<!DOCTYPE html>
         function showOrderForm(listingId) {
             document.getElementById('order-form').innerHTML =
                 '<form onsubmit="placeOrder(event, \'' + listingId + '\')">' +
-                '<div style="margin-bottom:15px"><label>QUANTITY:</label><br><input type="number" id="order-qty" value="1" min="1" style="width:100%"></div>' +
-                '<div style="margin-bottom:15px"><label>MESSAGE TO SELLER:</label><br><textarea id="order-msg" placeholder="Any special requests..." style="width:100%"></textarea></div>' +
-                '<div style="margin-bottom:15px"><label>DELIVERY ADDRESS (encrypted):</label><br><textarea id="order-addr" placeholder="Your delivery details..." style="width:100%"></textarea></div>' +
+                '<div style="margin-bottom:15px"><label>PAYMENT METHOD:</label><br>' +
+                '<select id="order-currency" style="width:100%">' +
+                '<option value="XMR">MONERO (XMR) - Maximum Privacy</option>' +
+                '<option value="ZEC">ZCASH (ZEC) - Shielded Transactions</option>' +
+                '</select></div>' +
+                '<div style="margin-bottom:15px"><label>YOUR REFUND ADDRESS (optional):</label><br>' +
+                '<input type="text" id="order-refund" placeholder="Your XMR/ZEC address for refunds..." style="width:100%"></div>' +
+                '<div style="margin-bottom:15px"><label>DELIVERY INFO (encrypted):</label><br>' +
+                '<textarea id="order-addr" placeholder="Shipping address, email, or delivery instructions..." style="width:100%"></textarea></div>' +
                 '<div style="padding:15px;border:1px solid var(--amber);margin-bottom:15px;color:var(--amber)">' +
-                'ESCROW: Funds will be held securely until you confirm receipt.' +
+                '<strong>ESCROW PROTECTION</strong><br>' +
+                '- Funds held securely until you confirm receipt<br>' +
+                '- 14-day auto-release after shipping<br>' +
+                '- Dispute resolution available<br>' +
+                '- 2% platform fee' +
                 '</div>' +
-                '<button type="submit" class="btn">PLACE ORDER</button>' +
+                '<button type="submit" class="btn">CREATE ESCROW ORDER</button>' +
                 '</form>';
             closeModal('listing-modal');
             showModal('order-modal');
@@ -2948,8 +3283,99 @@ const marketplaceHTML = `<!DOCTYPE html>
         
         async function placeOrder(e, listingId) {
             e.preventDefault();
-            alert('Order placed! In a real implementation, this would create an order with escrow.');
+            const currency = document.getElementById('order-currency').value;
+            const refundAddr = document.getElementById('order-refund').value;
+            const deliveryInfo = document.getElementById('order-addr').value;
+            
+            if (!deliveryInfo) {
+                alert('Please enter delivery information');
+                return;
+            }
+            
+            try {
+                const formData = new FormData();
+                formData.append('listing_id', listingId);
+                formData.append('currency', currency);
+                formData.append('buyer_address', refundAddr);
+                formData.append('delivery_info', deliveryInfo);
+                
+                const res = await fetch('/api/escrow/create', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (res.ok) {
+                    const result = await res.json();
+                    showPaymentModal(result);
+                } else {
+                    const err = await res.text();
+                    alert('Failed to create order: ' + err);
+                }
+            } catch (err) {
+                alert('Error: ' + err.message);
+            }
+        }
+        
+        function showPaymentModal(escrow) {
             closeModal('order-modal');
+            document.getElementById('order-form').innerHTML =
+                '<div style="text-align:center;padding:20px">' +
+                '<h2 style="color:var(--amber)">PAYMENT REQUIRED</h2>' +
+                '<p style="margin:20px 0">Send exactly:</p>' +
+                '<div style="font-size:32px;color:var(--green);padding:20px;border:2px solid var(--green);margin:20px 0">' +
+                escrow.amount.toFixed(8) + ' ' + escrow.currency +
+                '</div>' +
+                '<p style="margin:10px 0">To address:</p>' +
+                '<div style="background:var(--bg);padding:15px;border:1px solid var(--border);word-break:break-all;font-size:12px">' +
+                escrow.payment_address +
+                '</div>' +
+                '<button class="btn btn-outline" style="margin-top:10px" onclick="navigator.clipboard.writeText(\'' + escrow.payment_address + '\');this.textContent=\'COPIED!\'">' +
+                'COPY ADDRESS</button>' +
+                '<p style="margin:20px 0;color:var(--green-dim)">' +
+                'Order ID: ' + escrow.order_id + '<br>' +
+                'Fee: ' + escrow.fee_percent + '% (' + escrow.fee_amount.toFixed(8) + ' ' + escrow.currency + ')<br>' +
+                'Expires: ' + new Date(escrow.expires_at).toLocaleString() +
+                '</p>' +
+                '<div style="padding:15px;border:1px solid var(--amber);color:var(--amber);text-align:left">' +
+                'After sending payment, click below to check status.<br>' +
+                'Requires ' + (escrow.currency === 'XMR' ? '10' : '6') + ' confirmations.' +
+                '</div>' +
+                '<div style="margin-top:20px">' +
+                '<button class="btn" onclick="checkPaymentStatus(\'' + escrow.escrow_id + '\')">CHECK PAYMENT STATUS</button>' +
+                '<button class="btn btn-outline" style="margin-left:10px" onclick="simulatePayment(\'' + escrow.escrow_id + '\')">SIMULATE PAYMENT (DEMO)</button>' +
+                '</div>' +
+                '</div>';
+            showModal('order-modal');
+        }
+        
+        async function checkPaymentStatus(escrowId) {
+            const res = await fetch('/api/escrow/status?id=' + escrowId);
+            const status = await res.json();
+            
+            if (status.state === 'funded' || status.state === 'shipped' || status.state === 'completed') {
+                alert('Payment confirmed! State: ' + status.state.toUpperCase());
+                closeModal('order-modal');
+                loadOrders('buying');
+            } else if (status.state === 'created') {
+                alert('Payment not yet received. Please send ' + status.amount + ' ' + status.currency + ' to the address shown.');
+            } else {
+                alert('Order status: ' + status.state.toUpperCase());
+            }
+        }
+        
+        async function simulatePayment(escrowId) {
+            const res = await fetch('/api/escrow/pay', {
+                method: 'POST',
+                body: new URLSearchParams({ escrow_id: escrowId })
+            });
+            
+            if (res.ok) {
+                alert('Payment simulated! Funds are now in escrow.');
+                closeModal('order-modal');
+                loadOrders('buying');
+            } else {
+                alert('Failed to simulate payment');
+            }
         }
         
         function showMessageForm(sellerId, listingId) {
@@ -2971,13 +3397,109 @@ const marketplaceHTML = `<!DOCTYPE html>
         }
         
         async function loadOrders(type) {
-            document.getElementById('orders-list').innerHTML = 
-                '<div class="order">' +
-                '<div class="order-header">' +
-                '<span>No orders yet</span>' +
+            const role = type === 'buying' ? 'buyer' : 'seller';
+            const res = await fetch('/api/escrow/my?role=' + role);
+            const orders = await res.json();
+            const container = document.getElementById('orders-list');
+            
+            if (!orders || orders.length === 0) {
+                container.innerHTML = 
+                    '<div class="order">' +
+                    '<div class="order-header"><span>No ' + type + ' orders yet</span></div>' +
+                    '<p style="color:var(--green-dim)">Your ' + type + ' orders will appear here.</p>' +
+                    '</div>';
+                return;
+            }
+            
+            container.innerHTML = orders.map(o => {
+                const stateColors = {
+                    'created': 'var(--green-dim)',
+                    'funded': 'var(--amber)',
+                    'shipped': 'var(--blue)',
+                    'completed': 'var(--green)',
+                    'disputed': 'var(--red)',
+                    'refunded': 'var(--amber)',
+                    'cancelled': 'var(--red)',
+                    'expired': 'var(--red)'
+                };
+                const stateColor = stateColors[o.state] || 'var(--green-dim)';
+                
+                return '<div class="order" onclick="showEscrowDetails(\'' + o.escrow_id + '\')" style="cursor:pointer">' +
+                    '<div class="order-header">' +
+                    '<span>' + o.listing_title + '</span>' +
+                    '<span class="order-status" style="background:' + stateColor + ';color:#000">' + o.state.toUpperCase() + '</span>' +
+                    '</div>' +
+                    '<p>' + o.amount.toFixed(6) + ' ' + o.currency + '</p>' +
+                    '<p style="color:var(--green-dim);font-size:12px">' + new Date(o.created_at).toLocaleDateString() + '</p>' +
+                    '</div>';
+            }).join('');
+        }
+        
+        async function showEscrowDetails(escrowId) {
+            const res = await fetch('/api/escrow/status?id=' + escrowId);
+            const e = await res.json();
+            
+            let actions = '';
+            if (e.state === 'funded') {
+                actions = '<button class="btn" onclick="markShipped(\'' + escrowId + '\')">MARK SHIPPED</button>';
+            } else if (e.state === 'shipped') {
+                actions = '<button class="btn" onclick="releaseEscrow(\'' + escrowId + '\')">CONFIRM RECEIVED</button>' +
+                    '<button class="btn btn-danger" style="margin-left:10px" onclick="openDispute(\'' + escrowId + '\')">OPEN DISPUTE</button>';
+            }
+            
+            document.getElementById('order-form').innerHTML =
+                '<h2>' + e.listing_title + '</h2>' +
+                '<div style="padding:20px;border:1px solid var(--border);margin:15px 0">' +
+                '<p><strong>Status:</strong> <span style="color:var(--amber)">' + e.state.toUpperCase() + '</span></p>' +
+                '<p><strong>Amount:</strong> ' + e.amount.toFixed(8) + ' ' + e.currency + '</p>' +
+                '<p><strong>Order ID:</strong> ' + e.order_id + '</p>' +
+                (e.tx_id ? '<p><strong>TX ID:</strong> <span style="font-size:12px">' + e.tx_id + '</span></p>' : '') +
+                (e.tracking_info ? '<p><strong>Tracking:</strong> ' + e.tracking_info + '</p>' : '') +
+                '<p><strong>Created:</strong> ' + new Date(e.created_at).toLocaleString() + '</p>' +
+                (e.state === 'shipped' ? '<p><strong>Auto-release:</strong> ' + new Date(e.auto_release_at).toLocaleString() + '</p>' : '') +
                 '</div>' +
-                '<p style="color:var(--green-dim)">Your ' + type + ' orders will appear here.</p>' +
-                '</div>';
+                '<div style="margin-top:20px">' + actions + '</div>';
+            showModal('order-modal');
+        }
+        
+        async function markShipped(escrowId) {
+            const tracking = prompt('Enter tracking info (optional):');
+            const res = await fetch('/api/escrow/ship', {
+                method: 'POST',
+                body: new URLSearchParams({ escrow_id: escrowId, tracking_info: tracking || '' })
+            });
+            if (res.ok) {
+                alert('Order marked as shipped!');
+                closeModal('order-modal');
+                loadOrders('selling');
+            }
+        }
+        
+        async function releaseEscrow(escrowId) {
+            if (!confirm('Confirm you have received the item? This will release funds to the seller.')) return;
+            const res = await fetch('/api/escrow/release', {
+                method: 'POST',
+                body: new URLSearchParams({ escrow_id: escrowId })
+            });
+            if (res.ok) {
+                alert('Funds released to seller. Transaction complete!');
+                closeModal('order-modal');
+                loadOrders('buying');
+            }
+        }
+        
+        async function openDispute(escrowId) {
+            const reason = prompt('Reason for dispute:');
+            if (!reason) return;
+            const res = await fetch('/api/escrow/dispute', {
+                method: 'POST',
+                body: new URLSearchParams({ escrow_id: escrowId, reason: reason })
+            });
+            if (res.ok) {
+                alert('Dispute opened. Funds are frozen.');
+                closeModal('order-modal');
+                loadOrders('buying');
+            }
         }
         
         async function loadConversations() {
