@@ -42,8 +42,8 @@ type Listing struct {
 	Title       string    `json:"title"`
 	Description string    `json:"description"`
 	Category    string    `json:"category"`
-	Price       int64     `json:"price"`       // In network credits/tokens
-	Currency    string    `json:"currency"`    // "credits", "btc", "xmr", etc.
+	Price       float64   `json:"price"`       // Price in cryptocurrency
+	Currency    string    `json:"currency"`    // "XMR" (Monero) or "ZEC" (Zcash)
 	Image       string    `json:"image"`       // Image URL or data URI
 	Images      []string  `json:"images"`      // Additional images
 	SellerID    string    `json:"seller_id"`   // Node ID (anonymous)
@@ -101,8 +101,8 @@ type Order struct {
 	BuyerName   string    `json:"buyer_name"`
 	BuyerKey    []byte    `json:"buyer_key"`
 	Quantity    int       `json:"quantity"`
-	Price       int64     `json:"price"`
-	Total       int64     `json:"total"`
+	Price       float64   `json:"price"`
+	Total       float64   `json:"total"`
 	Currency    string    `json:"currency"`
 	Status      string    `json:"status"`
 	Message     string    `json:"message"`      // Buyer's message
@@ -116,7 +116,7 @@ type Order struct {
 	
 	// Escrow
 	EscrowID    string    `json:"escrow_id"`
-	EscrowAmount int64    `json:"escrow_amount"`
+	EscrowAmount float64  `json:"escrow_amount"`
 	
 	// Tracking
 	TrackingInfo string   `json:"tracking_info"` // Encrypted tracking
@@ -175,7 +175,7 @@ type SellerProfile struct {
 	TrustedSeller bool      `json:"trusted_seller"`
 	
 	// Stats
-	TotalSales    int64     `json:"total_sales"`
+	TotalSales    float64   `json:"total_sales"`
 	TotalOrders   int64     `json:"total_orders"`
 	Rating        float64   `json:"rating"`
 	ReviewCount   int64     `json:"review_count"`
@@ -191,7 +191,7 @@ type SellerProfile struct {
 type Escrow struct {
 	ID          string    `json:"id"`
 	OrderID     string    `json:"order_id"`
-	Amount      int64     `json:"amount"`
+	Amount      float64   `json:"amount"`
 	Currency    string    `json:"currency"`
 	Status      string    `json:"status"`       // held, released, refunded
 	CreatedAt   time.Time `json:"created_at"`
@@ -298,12 +298,12 @@ func (m *Marketplace) GetLocalName() string {
 }
 
 // CreateListing creates a new listing
-func (m *Marketplace) CreateListing(title, description, category string, price int64, currency string, ttl time.Duration) (*Listing, error) {
+func (m *Marketplace) CreateListing(title, description, category string, price float64, currency string, ttl time.Duration) (*Listing, error) {
 	return m.CreateListingFull(title, description, category, price, currency, "", "", ttl)
 }
 
 // CreateListingFull creates a new listing with all options
-func (m *Marketplace) CreateListingFull(title, description, category string, price int64, currency, image, sellerName string, ttl time.Duration) (*Listing, error) {
+func (m *Marketplace) CreateListingFull(title, description, category string, price float64, currency, image, sellerName string, ttl time.Duration) (*Listing, error) {
 	if title == "" || price < 0 {
 		return nil, ErrInvalidListing
 	}
@@ -567,10 +567,10 @@ func UnmarshalListing(data []byte) (*Listing, error) {
 func (m *Marketplace) signListing(l *Listing) []byte {
 	data, _ := json.Marshal(struct {
 		ID          string `json:"id"`
-		Title       string `json:"title"`
-		Description string `json:"description"`
-		Price       int64  `json:"price"`
-		SellerID    string `json:"seller_id"`
+		Title       string  `json:"title"`
+		Description string  `json:"description"`
+		Price       float64 `json:"price"`
+		SellerID    string  `json:"seller_id"`
 	}{l.ID, l.Title, l.Description, l.Price, l.SellerID})
 	return m.signFunc(data)
 }
@@ -580,11 +580,11 @@ func (m *Marketplace) verifyListing(l *Listing) bool {
 		return false
 	}
 	data, _ := json.Marshal(struct {
-		ID          string `json:"id"`
-		Title       string `json:"title"`
-		Description string `json:"description"`
-		Price       int64  `json:"price"`
-		SellerID    string `json:"seller_id"`
+		ID          string  `json:"id"`
+		Title       string  `json:"title"`
+		Description string  `json:"description"`
+		Price       float64 `json:"price"`
+		SellerID    string  `json:"seller_id"`
 	}{l.ID, l.Title, l.Description, l.Price, l.SellerID})
 	return ed25519.Verify(l.SellerKey, data, l.Signature)
 }
@@ -667,7 +667,7 @@ func (m *Marketplace) CreateOrder(listingID string, quantity int, message, addre
 		BuyerKey:     m.localKey,
 		Quantity:     quantity,
 		Price:        listing.Price,
-		Total:        listing.Price * int64(quantity),
+		Total:        listing.Price * float64(quantity),
 		Currency:     listing.Currency,
 		Status:       OrderStatusPending,
 		Message:      message,
@@ -678,10 +678,10 @@ func (m *Marketplace) CreateOrder(listingID string, quantity int, message, addre
 
 	// Sign the order
 	data, _ := json.Marshal(struct {
-		ID        string `json:"id"`
-		ListingID string `json:"listing_id"`
-		BuyerID   string `json:"buyer_id"`
-		Total     int64  `json:"total"`
+		ID        string  `json:"id"`
+		ListingID string  `json:"listing_id"`
+		BuyerID   string  `json:"buyer_id"`
+		Total     float64 `json:"total"`
 	}{order.ID, order.ListingID, order.BuyerID, order.Total})
 	order.Signature = m.signFunc(data)
 
@@ -1395,7 +1395,7 @@ func (m *Marketplace) IsFavorite(listingID string) bool {
 // =====================
 
 // SearchAdvanced performs advanced search with filters
-func (m *Marketplace) SearchAdvanced(query, category string, minPrice, maxPrice int64, sortBy string) []*Listing {
+func (m *Marketplace) SearchAdvanced(query, category string, minPrice, maxPrice float64, sortBy string) []*Listing {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 

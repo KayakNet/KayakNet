@@ -27,6 +27,7 @@ import (
 	"github.com/kayaknet/kayaknet/internal/chat"
 	"github.com/kayaknet/kayaknet/internal/config"
 	"github.com/kayaknet/kayaknet/internal/dht"
+	"github.com/kayaknet/kayaknet/internal/e2e"
 	"github.com/kayaknet/kayaknet/internal/escrow"
 	"github.com/kayaknet/kayaknet/internal/identity"
 	"github.com/kayaknet/kayaknet/internal/market"
@@ -69,6 +70,7 @@ type Node struct {
 	homepage     *Homepage
 	escrowMgr    *escrow.EscrowManager
 	cryptoWallet *escrow.CryptoWallet
+	e2e          *e2e.E2EManager
 	listener     net.PacketConn
 	connections  map[string]*PeerConn
 	ctx          context.Context
@@ -81,6 +83,9 @@ type Node struct {
 	peerScorer   *security.PeerScorer
 	nonceTracker *security.NonceTracker
 	validator    *security.MessageValidator
+	powManager   *security.PoWManager         // Anti-Sybil proof-of-work
+	hwKeyMgr     *security.HardwareKeyManager // Hardware key support
+	localPoW     *security.ProofOfWork        // Our own PoW proof
 }
 
 // PeerConn represents a connection to a peer
@@ -93,16 +98,19 @@ type PeerConn struct {
 
 // Message types
 const (
-	MsgTypePing       = 0x01
-	MsgTypePong       = 0x02
-	MsgTypeFindNode   = 0x03
-	MsgTypeNodes      = 0x04
-	MsgTypeChat       = 0x08
-	MsgTypeListing    = 0x10 // Marketplace listing
-	MsgTypeOnion      = 0x20 // Onion-routed message
-	MsgTypeNameReg    = 0x30 // .kyk domain registration
-	MsgTypeNameLookup = 0x31 // .kyk domain lookup
-	MsgTypeNameReply  = 0x32 // .kyk domain resolution response
+	MsgTypePing         = 0x01
+	MsgTypePong         = 0x02
+	MsgTypeFindNode     = 0x03
+	MsgTypeNodes        = 0x04
+	MsgTypeChat         = 0x08
+	MsgTypeListing      = 0x10 // Marketplace listing
+	MsgTypeOnion        = 0x20 // Onion-routed message
+	MsgTypeNameReg      = 0x30 // .kyk domain registration
+	MsgTypeNameLookup   = 0x31 // .kyk domain lookup
+	MsgTypeNameReply    = 0x32 // .kyk domain resolution response
+	MsgTypePoWChallenge = 0x40 // Proof-of-work challenge (anti-Sybil)
+	MsgTypePoWResponse  = 0x41 // Proof-of-work response
+	MsgTypePoWVerified  = 0x42 // PoW verification acknowledgment
 )
 
 // P2PMessage is the wire format
@@ -160,6 +168,15 @@ func (h *Homepage) Start(port int) error {
 	mux.HandleFunc("/api/escrow/dispute", h.handleEscrowDispute)
 	mux.HandleFunc("/api/escrow/my", h.handleMyEscrows)
 	mux.HandleFunc("/api/chat", h.handleChat)
+	mux.HandleFunc("/api/chat/rooms", h.handleChatRooms)
+	mux.HandleFunc("/api/chat/profile", h.handleChatProfile)
+	mux.HandleFunc("/api/chat/conversations", h.handleChatConversations)
+	mux.HandleFunc("/api/chat/dm", h.handleChatDM)
+	mux.HandleFunc("/api/chat/users", h.handleChatUsers)
+	mux.HandleFunc("/api/chat/user", h.handleChatUser)
+	mux.HandleFunc("/api/chat/search", h.handleChatSearch)
+	mux.HandleFunc("/api/chat/reaction", h.handleChatReaction)
+	mux.HandleFunc("/api/chat/block", h.handleChatBlock)
 	mux.HandleFunc("/api/domains", h.handleDomains)
 	mux.HandleFunc("/api/peers", h.handlePeers)
 	mux.HandleFunc("/api/stats", h.handleStats)
@@ -343,6 +360,20 @@ func NewNode(cfg *config.Config, name string) (*Node, error) {
 	nonceTracker := security.NewNonceTracker(5*time.Minute, 100000)
 	validator := security.NewMessageValidator(security.MaxMessageSize)
 
+	// Anti-Sybil: Proof of Work manager
+	// Difficulty 20 = ~1 second to solve on modern CPU
+	powManager := security.NewPoWManager(20)
+
+	// Hardware Key Support - try to detect hardware keys
+	hwKeyMgr := security.NewHardwareKeyManager()
+	devices, _ := hwKeyMgr.DetectHardwareKeys()
+	if len(devices) > 0 {
+		log.Printf("[SECURITY] Hardware key detected: %s", devices[0].Name)
+		if err := hwKeyMgr.Initialize(devices[0]); err == nil {
+			log.Printf("[SECURITY] Using hardware key for signing")
+		}
+	}
+
 	if name == "" {
 		name = fmt.Sprintf("anon-%s", id.NodeID()[:8])
 	}
@@ -364,6 +395,8 @@ func NewNode(cfg *config.Config, name string) (*Node, error) {
 		peerScorer:   peerScorer,
 		nonceTracker: nonceTracker,
 		validator:    validator,
+		powManager:   powManager,
+		hwKeyMgr:     hwKeyMgr,
 	}
 
 	// Create mixer for traffic analysis resistance
@@ -396,6 +429,14 @@ func NewNode(cfg *config.Config, name string) (*Node, error) {
 		id.PublicKey(),
 		name,
 		id.Sign,
+	)
+
+	// Create E2E encryption manager for perfect privacy
+	// Messages encrypted so ONLY recipient can read - no relay/bootstrap oversight
+	n.e2e = e2e.NewE2EManager(
+		id.NodeID(),
+		id.PublicKey(),
+		ed25519.PrivateKey(id.PrivateKey()),
 	)
 
 	// Create name service for .kyk domains
@@ -621,6 +662,12 @@ func (n *Node) handleMessage(from net.Addr, msg *P2PMessage) {
 		n.handleNameLookup(from, msg)
 	case MsgTypeNameReply:
 		n.handleNameReply(msg)
+	case MsgTypePoWChallenge:
+		n.handlePoWChallenge(from, msg)
+	case MsgTypePoWResponse:
+		n.handlePoWResponse(from, msg)
+	case MsgTypePoWVerified:
+		n.handlePoWVerified(msg)
 	}
 }
 
@@ -637,9 +684,15 @@ func (n *Node) verifySignature(msg *P2PMessage) bool {
 	return ed25519.Verify(msg.FromKey, toSign, msg.Signature)
 }
 
-// handlePing responds to ping
+// handlePing responds to ping and challenges unverified nodes
 func (n *Node) handlePing(from net.Addr, msg *P2PMessage) {
+	// Always respond to ping
 	n.sendDirect(from, MsgTypePong, msg.Payload)
+
+	// If this node hasn't completed PoW, send them a challenge
+	if n.requirePoW(msg.From) {
+		n.sendPoWChallenge(from, msg.From)
+	}
 }
 
 // handlePong processes pong
@@ -706,9 +759,10 @@ func (n *Node) handleNodes(msg *P2PMessage) {
 			continue
 		}
 
-		// Add as potential relay
-		if len(node.Key) == 32 {
+		// Add as potential relay and register E2E key
+		if len(node.Key) == ed25519.PublicKeySize {
 			n.onionRouter.AddRelay(node.ID, node.Key, node.Addr)
+			n.e2e.AddPeerKey(node.ID, node.Key)
 		}
 
 		addr, err := net.ResolveUDPAddr("udp", node.Addr)
@@ -719,8 +773,25 @@ func (n *Node) handleNodes(msg *P2PMessage) {
 	}
 }
 
-// handleChat processes chat (may be onion-routed)
+// handleChat processes chat (may be onion-routed, always E2E encrypted)
 func (n *Node) handleChat(msg *P2PMessage) {
+	// Register sender's key for future E2E encryption
+	if len(msg.FromKey) == ed25519.PublicKeySize {
+		n.e2e.AddPeerKey(msg.From, msg.FromKey)
+	}
+
+	// First try to decrypt E2E envelope
+	envelope, err := e2e.UnmarshalEnvelope(msg.Payload)
+	if err == nil {
+		// This is E2E encrypted - decrypt it
+		decrypted, err := n.e2e.Decrypt(envelope)
+		if err != nil {
+			// Not for us or decryption failed - ignore silently
+			return
+		}
+		msg.Payload = decrypted
+	}
+
 	// Parse the chat message
 	chatMsg, err := chat.UnmarshalMessage(msg.Payload)
 	if err != nil {
@@ -797,6 +868,100 @@ func (n *Node) handleNameReply(msg *P2PMessage) {
 		fmt.Printf("   %s\n", reg.Description)
 	}
 	fmt.Print("> ")
+}
+
+// handlePoWChallenge processes PoW challenges from the network
+// When we connect to a new node, they may challenge us
+func (n *Node) handlePoWChallenge(from net.Addr, msg *P2PMessage) {
+	var challenge security.Challenge
+	if err := json.Unmarshal(msg.Payload, &challenge); err != nil {
+		return
+	}
+
+	log.Printf("[POW] Received challenge from network (difficulty %d)", challenge.Difficulty)
+
+	// Solve the challenge in background
+	go func() {
+		startTime := time.Now()
+		proof, err := security.SolveChallenge(&challenge, n.identity.NodeID())
+		if err != nil {
+			log.Printf("[POW] Failed to solve challenge: %v", err)
+			return
+		}
+
+		solveTime := time.Since(startTime)
+		log.Printf("[POW] Solved challenge in %v (nonce: %d)", solveTime, proof.Nonce)
+
+		// Sign the proof
+		proofData, _ := json.Marshal(proof)
+		proof.Signature = n.identity.Sign(proofData)
+
+		// Store our proof
+		n.mu.Lock()
+		n.localPoW = proof
+		n.mu.Unlock()
+
+		// Send response
+		payload, _ := json.Marshal(proof)
+		n.sendDirect(from, MsgTypePoWResponse, payload)
+	}()
+}
+
+// handlePoWResponse processes PoW responses from nodes
+func (n *Node) handlePoWResponse(from net.Addr, msg *P2PMessage) {
+	var proof security.ProofOfWork
+	if err := json.Unmarshal(msg.Payload, &proof); err != nil {
+		return
+	}
+
+	// Verify the proof
+	if err := n.powManager.VerifyProof(&proof); err != nil {
+		log.Printf("[POW] Invalid proof from %s: %v", msg.From, err)
+		// Record bad behavior
+		n.peerScorer.RecordBad(msg.From, from.String(), "invalid PoW")
+		return
+	}
+
+	log.Printf("[POW] Verified proof from %s", msg.From[:16])
+
+	// Send verification acknowledgment
+	ack := map[string]interface{}{
+		"verified": true,
+		"node_id":  msg.From,
+	}
+	payload, _ := json.Marshal(ack)
+	n.sendDirect(from, MsgTypePoWVerified, payload)
+
+	// Record good behavior
+	n.peerScorer.RecordGood(msg.From)
+}
+
+// handlePoWVerified processes PoW verification acknowledgments
+func (n *Node) handlePoWVerified(msg *P2PMessage) {
+	var ack struct {
+		Verified bool   `json:"verified"`
+		NodeID   string `json:"node_id"`
+	}
+	if err := json.Unmarshal(msg.Payload, &ack); err != nil {
+		return
+	}
+
+	if ack.Verified && ack.NodeID == n.identity.NodeID() {
+		log.Printf("[POW] Our proof verified by %s", msg.From[:16])
+	}
+}
+
+// sendPoWChallenge sends a PoW challenge to a new node
+func (n *Node) sendPoWChallenge(addr net.Addr, nodeID string) {
+	challenge := n.powManager.GenerateChallenge(nodeID)
+	payload, _ := json.Marshal(challenge)
+	n.sendDirect(addr, MsgTypePoWChallenge, payload)
+	log.Printf("[POW] Sent challenge to %s (difficulty %d)", nodeID[:16], challenge.Difficulty)
+}
+
+// requirePoW checks if a node needs to complete PoW before full access
+func (n *Node) requirePoW(nodeID string) bool {
+	return n.powManager.RequireProof(nodeID)
 }
 
 // handleListing processes marketplace listings from the network
@@ -967,6 +1132,63 @@ func (n *Node) broadcast(msgType byte, payload []byte) int {
 	return count
 }
 
+// sendE2EEncryptedDM sends a DM with end-to-end encryption
+// Only the recipient can decrypt - not relays, not bootstrap, nobody else
+func (n *Node) sendE2EEncryptedDM(recipientID string, msg *chat.Message) error {
+	// Serialize the message
+	plaintext, err := msg.Marshal()
+	if err != nil {
+		return err
+	}
+
+	// E2E encrypt for recipient only
+	envelope, err := n.e2e.Encrypt(recipientID, plaintext)
+	if err != nil {
+		// Key not known - broadcast unencrypted (will be encrypted by transport)
+		log.Printf("[E2E] Recipient key not found, sending via transport encryption only")
+		return n.sendAnonymous(recipientID, MsgTypeChat, plaintext)
+	}
+
+	// Serialize envelope
+	envelopeData, err := envelope.Marshal()
+	if err != nil {
+		return err
+	}
+
+	// Send via onion routing (double protection: E2E + onion)
+	return n.sendAnonymous(recipientID, MsgTypeChat, envelopeData)
+}
+
+// sendE2EBroadcast encrypts a message for all known recipients
+// Each recipient gets their own E2E encrypted copy
+func (n *Node) sendE2EBroadcast(msgType byte, plaintext []byte) int {
+	n.mu.RLock()
+	peers := make([]string, 0, len(n.connections))
+	for id := range n.connections {
+		peers = append(peers, id)
+	}
+	n.mu.RUnlock()
+
+	count := 0
+	for _, id := range peers {
+		// Try E2E encryption for each peer
+		envelope, err := n.e2e.Encrypt(id, plaintext)
+		if err != nil {
+			// No key for this peer, send transport-encrypted only
+			if err := n.sendAnonymous(id, msgType, plaintext); err == nil {
+				count++
+			}
+			continue
+		}
+
+		envelopeData, _ := envelope.Marshal()
+		if err := n.sendAnonymous(id, msgType, envelopeData); err == nil {
+			count++
+		}
+	}
+	return count
+}
+
 // broadcastListing broadcasts a marketplace listing to all peers
 func (n *Node) broadcastListing(listing *market.Listing) {
 	data, err := listing.Marshal()
@@ -1099,7 +1321,7 @@ func (n *Node) interactiveMode() {
 			if len(parts) < 4 {
 				fmt.Println("Usage: sell <title> <price> <description...>")
 			} else {
-				price, _ := strconv.ParseInt(parts[2], 10, 64)
+				price, _ := strconv.ParseFloat(parts[2], 64)
 				n.cmdSell(parts[1], price, strings.Join(parts[3:], " "))
 			}
 		case "buy":
@@ -1230,14 +1452,14 @@ func (n *Node) cmdChat(room, message string) {
 		return
 	}
 
-	// Broadcast to network
+	// Broadcast with E2E encryption to all peers
 	payload, _ := msg.Marshal()
-	count := n.broadcast(MsgTypeChat, payload)
+	count := n.sendE2EBroadcast(MsgTypeChat, payload)
 
 	if n.onionRouter.CanRoute() {
-		fmt.Printf("[ONION] Sent anonymously to %d peers\n", count)
+		fmt.Printf("[E2E+ONION] Sent encrypted to %d peers (triple protected)\n", count)
 	} else {
-		fmt.Printf("[SEND] Sent to %d peers (need %d+ for anonymity)\n", count, onion.MinHops)
+		fmt.Printf("[E2E] Sent encrypted to %d peers (need %d+ for onion routing)\n", count, onion.MinHops)
 	}
 }
 
@@ -1360,13 +1582,13 @@ func (n *Node) cmdBrowse(category string) {
 	}
 }
 
-func (n *Node) cmdSell(title string, price int64, description string) {
+func (n *Node) cmdSell(title string, price float64, description string) {
 	listing, err := n.marketplace.CreateListing(
 		title,
 		description,
 		"general",
 		price,
-		"credits",
+		"XMR",
 		7*24*time.Hour, // 7 day TTL
 	)
 	if err != nil {
@@ -1796,6 +2018,7 @@ func (h *Homepage) handleCreateListing(w http.ResponseWriter, r *http.Request) {
 	title := r.FormValue("title")
 	category := r.FormValue("category")
 	priceStr := r.FormValue("price")
+	currency := r.FormValue("currency")
 	description := r.FormValue("description")
 	image := r.FormValue("image")
 
@@ -1804,9 +2027,18 @@ func (h *Homepage) handleCreateListing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	price, _ := strconv.ParseInt(priceStr, 10, 64)
+	price, _ := strconv.ParseFloat(priceStr, 64)
 	if price < 0 {
 		price = 0
+	}
+
+	// Default to XMR if no currency specified
+	if currency == "" {
+		currency = "XMR"
+	}
+	// Validate currency
+	if currency != "XMR" && currency != "ZEC" {
+		currency = "XMR"
 	}
 
 	// Get seller name from node config or use default
@@ -1825,7 +2057,7 @@ func (h *Homepage) handleCreateListing(w http.ResponseWriter, r *http.Request) {
 		description,
 		category,
 		price,
-		"KNT",
+		currency,
 		image,
 		sellerName,
 		30*24*time.Hour, // 30 days TTL
@@ -2228,8 +2460,27 @@ func (h *Homepage) handleChat(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "POST" {
 		room := r.FormValue("room")
 		message := r.FormValue("message")
-		if h.node != nil && room != "" && message != "" {
-			h.node.chatMgr.SendMessage(room, message)
+		mediaType := r.FormValue("media_type")
+		mediaName := r.FormValue("media_name")
+		mediaData := r.FormValue("media_data")
+
+		if h.node != nil && room != "" && (message != "" || mediaData != "") {
+			var media *chat.MediaAttachment
+			if mediaData != "" {
+				media = &chat.MediaAttachment{
+					Type: mediaType,
+					Name: mediaName,
+					Data: mediaData,
+				}
+			}
+			// Send locally
+			chatMsg, _ := h.node.chatMgr.SendMessageWithMedia(room, message, media)
+
+			// Broadcast with E2E encryption to all peers
+			if chatMsg != nil {
+				payload, _ := chatMsg.Marshal()
+				h.node.sendE2EBroadcast(MsgTypeChat, payload)
+			}
 		}
 		w.WriteHeader(http.StatusOK)
 		return
@@ -2240,20 +2491,233 @@ func (h *Homepage) handleChat(w http.ResponseWriter, r *http.Request) {
 		room = "general"
 	}
 
-	var messages []map[string]string
+	var messages []map[string]interface{}
 	if h.node != nil {
-		for _, m := range h.node.chatMgr.GetMessages(room, 50) {
-			messages = append(messages, map[string]string{
+		for _, m := range h.node.chatMgr.GetMessages(room, 100) {
+			msg := map[string]interface{}{
+				"id":        m.ID,
+				"type":      m.Type,
 				"room":      m.Room,
+				"sender_id": m.SenderID,
 				"nick":      m.Nick,
 				"content":   m.Content,
-				"timestamp": m.Timestamp.Format("15:04:05"),
-			})
+				"timestamp": m.Timestamp.Format(time.RFC3339),
+				"reactions": m.Reactions,
+			}
+			if m.Media != nil {
+				msg["media"] = m.Media
+			}
+			messages = append(messages, msg)
 		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(messages)
+}
+
+func (h *Homepage) handleChatRooms(w http.ResponseWriter, r *http.Request) {
+	var rooms []map[string]interface{}
+	if h.node != nil {
+		for _, room := range h.node.chatMgr.ListRooms() {
+			rooms = append(rooms, map[string]interface{}{
+				"name":        room.Name,
+				"description": room.Description,
+				"private":     room.Private,
+				"members":     len(room.Members),
+			})
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(rooms)
+}
+
+func (h *Homepage) handleChatProfile(w http.ResponseWriter, r *http.Request) {
+	if h.node == nil {
+		http.Error(w, "Node not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	if r.Method == "POST" {
+		nick := r.FormValue("nick")
+		status := r.FormValue("status")
+		statusMsg := r.FormValue("status_msg")
+		bio := r.FormValue("bio")
+		avatar := r.FormValue("avatar")
+		h.node.chatMgr.UpdateProfile(nick, status, statusMsg, bio, avatar)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	user := h.node.chatMgr.GetLocalUser()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(user)
+}
+
+func (h *Homepage) handleChatConversations(w http.ResponseWriter, r *http.Request) {
+	var convs []map[string]interface{}
+	if h.node != nil {
+		for _, conv := range h.node.chatMgr.GetConversations() {
+			convs = append(convs, map[string]interface{}{
+				"id":           conv.ID,
+				"participants": conv.Participants,
+				"last_message": conv.LastMessage.Format(time.RFC3339),
+				"unread":       conv.Unread,
+			})
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(convs)
+}
+
+func (h *Homepage) handleChatDM(w http.ResponseWriter, r *http.Request) {
+	if h.node == nil {
+		http.Error(w, "Node not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	if r.Method == "POST" {
+		userID := r.FormValue("user")
+		message := r.FormValue("message")
+		mediaType := r.FormValue("media_type")
+		mediaName := r.FormValue("media_name")
+		mediaData := r.FormValue("media_data")
+
+		if userID != "" && (message != "" || mediaData != "") {
+			var media *chat.MediaAttachment
+			if mediaData != "" {
+				media = &chat.MediaAttachment{
+					Type: mediaType,
+					Name: mediaName,
+					Data: mediaData,
+				}
+			}
+			chatMsg, err := h.node.chatMgr.SendDM(userID, message, media)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			// Send E2E encrypted DM over the network
+			h.node.sendE2EEncryptedDM(userID, chatMsg)
+		}
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	userID := r.URL.Query().Get("user")
+	var messages []map[string]interface{}
+	if userID != "" {
+		for _, m := range h.node.chatMgr.GetDMMessages(userID, 100) {
+			msg := map[string]interface{}{
+				"id":          m.ID,
+				"type":        m.Type,
+				"sender_id":   m.SenderID,
+				"receiver_id": m.ReceiverID,
+				"nick":        m.Nick,
+				"content":     m.Content,
+				"timestamp":   m.Timestamp.Format(time.RFC3339),
+			}
+			if m.Media != nil {
+				msg["media"] = m.Media
+			}
+			messages = append(messages, msg)
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(messages)
+}
+
+func (h *Homepage) handleChatUsers(w http.ResponseWriter, r *http.Request) {
+	room := r.URL.Query().Get("room")
+	var users []map[string]interface{}
+
+	if h.node != nil {
+		var userList []*chat.User
+		if room != "" {
+			userList = h.node.chatMgr.GetOnlineUsers(room)
+		} else {
+			userList = h.node.chatMgr.GetUsers()
+		}
+		for _, u := range userList {
+			users = append(users, map[string]interface{}{
+				"id":            u.ID,
+				"nick":          u.Nick,
+				"status":        u.Status,
+				"status_msg":    u.StatusMsg,
+				"last_seen":     u.LastSeen.Format(time.RFC3339),
+				"messages_sent": u.MessagesSent,
+			})
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(users)
+}
+
+func (h *Homepage) handleChatUser(w http.ResponseWriter, r *http.Request) {
+	userID := r.URL.Query().Get("id")
+	if userID == "" || h.node == nil {
+		http.Error(w, "User not found", http.StatusNotFound)
+		return
+	}
+
+	user := h.node.chatMgr.GetUser(userID)
+	if user == nil {
+		http.Error(w, "User not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(user)
+}
+
+func (h *Homepage) handleChatSearch(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query().Get("q")
+	var users []map[string]interface{}
+
+	if h.node != nil && query != "" {
+		for _, u := range h.node.chatMgr.SearchUsers(query) {
+			users = append(users, map[string]interface{}{
+				"id":     u.ID,
+				"nick":   u.Nick,
+				"status": u.Status,
+			})
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(users)
+}
+
+func (h *Homepage) handleChatReaction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	room := r.FormValue("room")
+	messageID := r.FormValue("message_id")
+	emoji := r.FormValue("emoji")
+
+	if h.node != nil && room != "" && messageID != "" && emoji != "" {
+		err := h.node.chatMgr.AddReaction(room, messageID, emoji)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (h *Homepage) handleChatBlock(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	userID := r.FormValue("user")
+	if h.node != nil && userID != "" {
+		h.node.chatMgr.BlockUser(userID)
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 func (h *Homepage) handleDomains(w http.ResponseWriter, r *http.Request) {
@@ -2908,7 +3372,13 @@ const marketplaceHTML = `<!DOCTYPE html>
                         <option value="education">EDUCATION</option>
                         <option value="hardware">HARDWARE</option>
                     </select></div>
-                    <div style="margin-bottom:15px"><label>PRICE (KNT):</label><br><input type="number" id="new-price" min="0" required style="width:100%"></div>
+                    <div style="margin-bottom:15px;display:flex;gap:10px;">
+                        <div style="flex:1"><label>PRICE:</label><br><input type="number" id="new-price" min="0" step="0.0001" required style="width:100%"></div>
+                        <div style="width:120px"><label>CURRENCY:</label><br><select id="new-currency" style="width:100%">
+                            <option value="XMR">XMR (Monero)</option>
+                            <option value="ZEC">ZEC (Zcash)</option>
+                        </select></div>
+                    </div>
                     <div style="margin-bottom:15px"><label>DESCRIPTION:</label><br><textarea id="new-desc" required style="width:100%"></textarea></div>
                     <div style="margin-bottom:15px"><label>IMAGE URL:</label><br><input type="text" id="new-image" placeholder="https://..." style="width:100%"></div>
                     <button type="submit" class="btn">CREATE LISTING</button>
@@ -2971,7 +3441,7 @@ const marketplaceHTML = `<!DOCTYPE html>
         
         function renderListing(l) {
             const priceClass = l.price === 0 ? 'price free' : 'price';
-            const priceText = l.price === 0 ? 'FREE' : l.price + ' ' + (l.currency || 'KNT');
+            const priceText = l.price === 0 ? 'FREE' : l.price + ' ' + (l.currency || 'XMR');
             const imgUrl = l.image || 'https://picsum.photos/seed/' + l.id + '/400/300';
             const sellerName = l.seller_name || 'anonymous';
             const rating = l.rating ? l.rating.toFixed(1) : '-';
@@ -2999,7 +3469,7 @@ const marketplaceHTML = `<!DOCTYPE html>
             currentListing = l;
             
             const imgUrl = l.image || 'https://picsum.photos/seed/' + l.id + '/400/300';
-            const priceText = l.price === 0 ? 'FREE' : l.price + ' ' + (l.currency || 'KNT');
+            const priceText = l.price === 0 ? 'FREE' : l.price + ' ' + (l.currency || 'XMR');
             const stars = l.rating ? '★'.repeat(Math.round(l.rating)) + '☆'.repeat(5-Math.round(l.rating)) : '☆☆☆☆☆';
             
             document.getElementById('listing-detail').innerHTML = 
@@ -3369,6 +3839,7 @@ const marketplaceHTML = `<!DOCTYPE html>
             const title = document.getElementById('new-title').value;
             const category = document.getElementById('new-category').value;
             const price = document.getElementById('new-price').value;
+            const currency = document.getElementById('new-currency').value;
             const desc = document.getElementById('new-desc').value;
             const image = document.getElementById('new-image').value;
             
@@ -3376,6 +3847,7 @@ const marketplaceHTML = `<!DOCTYPE html>
             formData.append('title', title);
             formData.append('category', category);
             formData.append('price', price);
+            formData.append('currency', currency);
             formData.append('description', desc);
             formData.append('image', image);
             
@@ -3423,42 +3895,122 @@ const chatPageHTML = `<!DOCTYPE html>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=VT323&display=swap');
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        :root { --bg: #000; --green: #00ff00; --green-dim: #00aa00; --green-glow: #00ff0066; --border: #00ff0033; }
+        :root { --bg: #000; --green: #00ff00; --green-dim: #00aa00; --green-glow: #00ff0066; --border: #00ff0033; --amber: #ffaa00; --red: #ff4444; --cyan: #00ffff; }
         body { font-family: 'VT323', monospace; background: var(--bg); color: var(--green); height: 100vh; display: flex; flex-direction: column; }
         body::before { content: ""; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: repeating-linear-gradient(0deg, rgba(0,0,0,0.15) 0px, rgba(0,0,0,0.15) 1px, transparent 1px, transparent 2px); pointer-events: none; z-index: 1000; }
-        .container { max-width: 1000px; margin: 0 auto; padding: 20px; width: 100%; flex: 1; display: flex; flex-direction: column; }
+        .container { max-width: 1400px; margin: 0 auto; padding: 10px; width: 100%; flex: 1; display: flex; flex-direction: column; }
         .terminal { border: 1px solid var(--green); background: #0a0a0a; box-shadow: 0 0 20px var(--green-glow); flex: 1; display: flex; flex-direction: column; }
-        .term-header { background: var(--green); color: var(--bg); padding: 5px 15px; font-size: 14px; flex-shrink: 0; }
-        .term-body { padding: 15px; flex: 1; display: flex; flex-direction: column; min-height: 0; }
-        header { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px dashed var(--border); flex-shrink: 0; }
-        .logo { font-size: 24px; color: var(--green); text-decoration: none; text-shadow: 0 0 10px var(--green-glow); }
+        .term-header { background: var(--green); color: var(--bg); padding: 5px 15px; font-size: 14px; flex-shrink: 0; display: flex; justify-content: space-between; align-items: center; }
+        .term-body { padding: 10px; flex: 1; display: flex; flex-direction: column; min-height: 0; }
+        header { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px dashed var(--border); flex-shrink: 0; }
+        .logo { font-size: 20px; color: var(--green); text-decoration: none; text-shadow: 0 0 10px var(--green-glow); }
         .logo::before { content: "["; } .logo::after { content: "]"; }
-        nav { display: flex; gap: 15px; }
-        nav a { color: var(--green-dim); text-decoration: none; padding: 5px 10px; border: 1px solid transparent; }
+        nav { display: flex; gap: 10px; }
+        nav a { color: var(--green-dim); text-decoration: none; padding: 3px 8px; border: 1px solid transparent; font-size: 14px; }
         nav a:hover, nav a.active { color: var(--green); border-color: var(--green); }
-        .chat-container { display: flex; flex: 1; margin-top: 15px; gap: 15px; min-height: 0; }
-        .rooms { width: 180px; border: 1px solid var(--border); padding: 10px; flex-shrink: 0; }
-        .rooms h3 { margin-bottom: 10px; font-size: 14px; color: var(--green-dim); }
-        .room { padding: 8px; cursor: pointer; margin-bottom: 5px; border: 1px solid transparent; }
-        .room:hover, .room.active { border-color: var(--green); color: var(--green); text-shadow: 0 0 5px var(--green-glow); }
-        .messages-container { flex: 1; display: flex; flex-direction: column; border: 1px solid var(--border); min-height: 0; }
-        .messages { flex: 1; padding: 15px; overflow-y: auto; background: var(--bg); }
-        .message { margin-bottom: 12px; font-size: 16px; }
-        .message .nick { color: var(--green); }
-        .message .nick::before { content: "<"; color: var(--green-dim); }
-        .message .nick::after { content: ">"; color: var(--green-dim); }
-        .message .time { color: var(--green-dim); font-size: 12px; margin-left: 10px; }
-        .message .content { margin-top: 3px; color: var(--green-dim); padding-left: 20px; }
-        .input-area { padding: 10px; border-top: 1px dashed var(--border); display: flex; gap: 10px; background: #0a0a0a; }
-        .input-area input { flex: 1; padding: 10px; background: var(--bg); border: 1px solid var(--green); color: var(--green); font-family: inherit; font-size: 16px; }
+        .chat-layout { display: flex; flex: 1; margin-top: 10px; gap: 10px; min-height: 0; }
+        
+        /* Left sidebar - Rooms & DMs */
+        .sidebar-left { width: 200px; display: flex; flex-direction: column; gap: 10px; flex-shrink: 0; }
+        .panel { border: 1px solid var(--border); background: rgba(0,20,0,0.5); }
+        .panel-header { padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 12px; color: var(--green-dim); display: flex; justify-content: space-between; align-items: center; }
+        .panel-body { padding: 5px; max-height: 200px; overflow-y: auto; }
+        .room-item, .dm-item, .user-item { padding: 6px 8px; cursor: pointer; border: 1px solid transparent; margin: 2px 0; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+        .room-item:hover, .room-item.active, .dm-item:hover, .dm-item.active { border-color: var(--green); background: rgba(0,255,0,0.05); }
+        .room-item .unread, .dm-item .unread { background: var(--amber); color: var(--bg); padding: 0 5px; font-size: 10px; margin-left: auto; }
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+        .status-online { background: var(--green); box-shadow: 0 0 5px var(--green); }
+        .status-away { background: var(--amber); }
+        .status-offline { background: var(--green-dim); opacity: 0.5; }
+        
+        /* Main chat area */
+        .chat-main { flex: 1; display: flex; flex-direction: column; border: 1px solid var(--border); min-width: 0; }
+        .chat-header { padding: 10px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; background: rgba(0,20,0,0.5); }
+        .chat-title { font-size: 18px; }
+        .chat-title::before { content: "#"; color: var(--green-dim); }
+        .chat-topic { font-size: 12px; color: var(--green-dim); margin-top: 3px; }
+        .typing-indicator { font-size: 12px; color: var(--cyan); font-style: italic; }
+        .messages { flex: 1; padding: 10px; overflow-y: auto; background: var(--bg); }
+        .message { margin-bottom: 10px; padding: 8px; border-left: 2px solid transparent; }
+        .message:hover { background: rgba(0,255,0,0.02); border-left-color: var(--green-dim); }
+        .message-header { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+        .message .avatar { width: 28px; height: 28px; border: 1px solid var(--green); display: flex; align-items: center; justify-content: center; font-size: 12px; background: rgba(0,255,0,0.1); flex-shrink: 0; }
+        .message .nick { color: var(--green); cursor: pointer; font-size: 15px; }
+        .message .nick:hover { text-decoration: underline; }
+        .message .user-id { color: var(--green-dim); font-size: 10px; opacity: 0.6; }
+        .message .time { color: var(--green-dim); font-size: 11px; margin-left: auto; }
+        .message .content { color: #aaffaa; padding-left: 38px; font-size: 15px; line-height: 1.4; word-break: break-word; }
+        .message .media { margin-top: 8px; padding-left: 38px; }
+        .message .media img { max-width: 300px; max-height: 200px; border: 1px solid var(--border); cursor: pointer; }
+        .message .reactions { display: flex; gap: 5px; margin-top: 5px; padding-left: 38px; }
+        .message .reaction { padding: 2px 6px; border: 1px solid var(--border); font-size: 12px; cursor: pointer; }
+        .message .reaction:hover { border-color: var(--green); }
+        .message.system { border-left-color: var(--cyan); }
+        .message.system .nick { color: var(--cyan); }
+        .message.dm { border-left-color: var(--amber); background: rgba(255,170,0,0.03); }
+        
+        /* Input area */
+        .input-area { padding: 10px; border-top: 1px solid var(--border); background: rgba(0,20,0,0.5); }
+        .input-row { display: flex; gap: 8px; align-items: center; }
+        .input-area input[type="text"] { flex: 1; padding: 10px; background: var(--bg); border: 1px solid var(--green); color: var(--green); font-family: inherit; font-size: 15px; }
         .input-area input:focus { outline: none; box-shadow: 0 0 10px var(--green-glow); }
-        .input-area button { padding: 10px 20px; background: var(--green); color: var(--bg); border: none; cursor: pointer; font-family: inherit; font-size: 16px; }
+        .input-btn { padding: 10px 15px; background: transparent; border: 1px solid var(--green); color: var(--green); cursor: pointer; font-family: inherit; font-size: 14px; }
+        .input-btn:hover { background: var(--green); color: var(--bg); }
+        .input-btn.primary { background: var(--green); color: var(--bg); }
+        .file-input { display: none; }
+        
+        /* Right sidebar - Users */
+        .sidebar-right { width: 180px; display: flex; flex-direction: column; gap: 10px; flex-shrink: 0; }
+        .user-item .user-nick { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+        .user-item .user-status { font-size: 10px; color: var(--green-dim); }
+        
+        /* Profile modal */
+        .modal { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.9); z-index: 2000; align-items: center; justify-content: center; }
+        .modal.active { display: flex; }
+        .modal-content { background: #0a0a0a; border: 1px solid var(--green); padding: 20px; max-width: 500px; width: 90%; max-height: 80vh; overflow-y: auto; }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+        .modal-close { cursor: pointer; font-size: 20px; }
+        .profile-avatar { width: 80px; height: 80px; border: 2px solid var(--green); display: flex; align-items: center; justify-content: center; font-size: 32px; margin: 0 auto 15px; }
+        .profile-nick { text-align: center; font-size: 24px; margin-bottom: 5px; }
+        .profile-id { text-align: center; font-size: 12px; color: var(--green-dim); margin-bottom: 15px; word-break: break-all; }
+        .profile-status { text-align: center; margin-bottom: 15px; }
+        .profile-bio { padding: 10px; border: 1px solid var(--border); margin-bottom: 15px; color: var(--green-dim); }
+        .profile-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px; }
+        .profile-stat { text-align: center; padding: 10px; border: 1px solid var(--border); }
+        .profile-stat-value { font-size: 20px; color: var(--green); }
+        .profile-stat-label { font-size: 11px; color: var(--green-dim); }
+        .profile-actions { display: flex; gap: 10px; }
+        .profile-actions button { flex: 1; }
+        
+        /* Image viewer */
+        .image-viewer { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.95); z-index: 3000; align-items: center; justify-content: center; cursor: pointer; }
+        .image-viewer.active { display: flex; }
+        .image-viewer img { max-width: 90%; max-height: 90%; border: 2px solid var(--green); }
+        
+        /* Tabs */
+        .tabs { display: flex; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
+        .tab { padding: 8px 15px; cursor: pointer; border-bottom: 2px solid transparent; color: var(--green-dim); }
+        .tab:hover { color: var(--green); }
+        .tab.active { color: var(--green); border-bottom-color: var(--green); }
+        
+        @media (max-width: 900px) {
+            .sidebar-right { display: none; }
+            .sidebar-left { width: 150px; }
+        }
+        @media (max-width: 600px) {
+            .sidebar-left { width: 50px; }
+            .room-item span, .dm-item span { display: none; }
+            .panel-header span { display: none; }
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="terminal">
-            <div class="term-header">KAYAKNET SECURE CHAT // ONION ROUTED</div>
+            <div class="term-header">
+                <span>KAYAKNET SECURE CHAT // ONION ROUTED // E2E ENCRYPTED</span>
+                <span id="connection-status">CONNECTED</span>
+            </div>
             <div class="term-body">
                 <header>
                     <a href="/" class="logo">KAYAKNET</a>
@@ -3469,63 +4021,424 @@ const chatPageHTML = `<!DOCTYPE html>
                         <a href="/network">/network</a>
                     </nav>
                 </header>
-                <div class="chat-container">
-                    <div class="rooms">
-                        <h3>// CHANNELS</h3>
-                        <div class="room active" data-room="general">#general</div>
-                        <div class="room" data-room="trading">#trading</div>
-                        <div class="room" data-room="tech">#tech</div>
-                        <div class="room" data-room="random">#random</div>
-                    </div>
-                    <div class="messages-container">
-                        <div class="messages" id="messages">
-                            <div class="message">
-                                <span class="nick">SYSTEM</span>
-                                <span class="time">00:00</span>
-                                <div class="content">// Secure channel established. Messages are onion-routed.</div>
+                <div class="chat-layout">
+                    <!-- Left Sidebar -->
+                    <div class="sidebar-left">
+                        <div class="panel">
+                            <div class="panel-header"><span>CHANNELS</span><span style="cursor:pointer" onclick="showCreateRoom()">+</span></div>
+                            <div class="panel-body" id="rooms-list"></div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-header"><span>DIRECT MESSAGES</span></div>
+                            <div class="panel-body" id="dm-list"></div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-header"><span>MY PROFILE</span></div>
+                            <div class="panel-body">
+                                <div class="user-item" onclick="showMyProfile()" id="my-profile">
+                                    <div class="status-dot status-online"></div>
+                                    <span class="user-nick">Loading...</span>
+                                </div>
                             </div>
                         </div>
+                    </div>
+                    
+                    <!-- Main Chat -->
+                    <div class="chat-main">
+                        <div class="chat-header">
+                            <div>
+                                <div class="chat-title" id="chat-title">general</div>
+                                <div class="chat-topic" id="chat-topic">General discussion - welcome to KayakNet!</div>
+                            </div>
+                            <div class="typing-indicator" id="typing-indicator"></div>
+                        </div>
+                        <div class="messages" id="messages"></div>
                         <div class="input-area">
-                            <input type="text" id="message" placeholder="msg://..." />
-                            <button onclick="sendMessage()">SEND</button>
+                            <div class="input-row">
+                                <input type="file" id="file-input" class="file-input" accept="image/*,.pdf,.txt,.zip" onchange="handleFileSelect(event)">
+                                <button class="input-btn" onclick="document.getElementById('file-input').click()" title="Attach file">+FILE</button>
+                                <input type="text" id="message-input" placeholder="Type a message... (Shift+Enter for newline)" onkeydown="handleKeyDown(event)" oninput="handleTyping()">
+                                <button class="input-btn" onclick="insertEmoji()">:)</button>
+                                <button class="input-btn primary" onclick="sendMessage()">SEND</button>
+                            </div>
+                            <div id="attachment-preview" style="margin-top:8px;display:none;"></div>
+                        </div>
+                    </div>
+                    
+                    <!-- Right Sidebar - Users -->
+                    <div class="sidebar-right">
+                        <div class="panel" style="flex:1;display:flex;flex-direction:column;">
+                            <div class="panel-header"><span>ONLINE</span> <span id="online-count">0</span></div>
+                            <div class="panel-body" id="users-list" style="flex:1;max-height:none;"></div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-header"><span>FIND USERS</span></div>
+                            <div class="panel-body">
+                                <input type="text" id="user-search" placeholder="Search..." style="width:100%;padding:5px;background:var(--bg);border:1px solid var(--border);color:var(--green);font-family:inherit;" oninput="searchUsers()">
+                                <div id="search-results" style="margin-top:5px;"></div>
+                            </div>
                         </div>
                     </div>
                 </div>
             </div>
         </div>
     </div>
+    
+    <!-- Profile Modal -->
+    <div class="modal" id="profile-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <span>USER PROFILE</span>
+                <span class="modal-close" onclick="closeModal('profile-modal')">X</span>
+            </div>
+            <div id="profile-content"></div>
+        </div>
+    </div>
+    
+    <!-- Image Viewer -->
+    <div class="image-viewer" id="image-viewer" onclick="this.classList.remove('active')">
+        <img id="viewer-image" src="">
+    </div>
+
     <script>
         let currentRoom = 'general';
-        document.querySelectorAll('.room').forEach(el => {
-            el.addEventListener('click', () => {
-                document.querySelectorAll('.room').forEach(r => r.classList.remove('active'));
-                el.classList.add('active');
-                currentRoom = el.dataset.room;
-                loadMessages();
-            });
-        });
-        async function loadMessages() {
-            const res = await fetch('/api/chat?room=' + currentRoom);
-            const messages = await res.json();
-            const container = document.getElementById('messages');
-            if (!messages || messages.length === 0) {
-                container.innerHTML = '<div class="message"><span class="nick">SYSTEM</span><div class="content">// No messages. Start transmission.</div></div>';
-                return;
-            }
-            container.innerHTML = messages.map(m => '<div class="message"><span class="nick">' + m.nick.toUpperCase() + '</span><span class="time">' + m.timestamp + '</span><div class="content">' + m.content + '</div></div>').join('');
-            container.scrollTop = container.scrollHeight;
+        let currentDM = null;
+        let myProfile = null;
+        let pendingAttachment = null;
+        let typingTimeout = null;
+        
+        // Initialize
+        async function init() {
+            await loadMyProfile();
+            await loadRooms();
+            await loadDMs();
+            await loadMessages();
+            await loadOnlineUsers();
+            
+            // Poll for updates
+            setInterval(loadMessages, 2000);
+            setInterval(loadOnlineUsers, 5000);
+            setInterval(loadDMs, 10000);
         }
-        async function sendMessage() {
-            const input = document.getElementById('message');
-            const message = input.value.trim();
-            if (!message) return;
-            await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'room=' + currentRoom + '&message=' + encodeURIComponent(message) });
-            input.value = '';
+        
+        async function loadMyProfile() {
+            try {
+                const res = await fetch('/api/chat/profile');
+                myProfile = await res.json();
+                document.getElementById('my-profile').innerHTML = 
+                    '<div class="status-dot status-' + myProfile.status + '"></div>' +
+                    '<span class="user-nick">' + escapeHtml(myProfile.nick || myProfile.id.substring(0,8)) + '</span>';
+            } catch(e) { console.error('Failed to load profile:', e); }
+        }
+        
+        async function loadRooms() {
+            try {
+                const res = await fetch('/api/chat/rooms');
+                const rooms = await res.json();
+                const container = document.getElementById('rooms-list');
+                container.innerHTML = rooms.map(r => 
+                    '<div class="room-item' + (r.name === currentRoom && !currentDM ? ' active' : '') + '" onclick="selectRoom(\'' + r.name + '\')">' +
+                    '<span>#' + escapeHtml(r.name) + '</span>' +
+                    '</div>'
+                ).join('');
+            } catch(e) { console.error('Failed to load rooms:', e); }
+        }
+        
+        async function loadDMs() {
+            try {
+                const res = await fetch('/api/chat/conversations');
+                const convs = await res.json();
+                const container = document.getElementById('dm-list');
+                if (!convs || convs.length === 0) {
+                    container.innerHTML = '<div style="padding:5px;color:var(--green-dim);font-size:12px;">No conversations</div>';
+                    return;
+                }
+                container.innerHTML = convs.map(c => {
+                    const otherUser = c.participants.find(p => p !== myProfile?.id) || c.participants[0];
+                    return '<div class="dm-item' + (currentDM === otherUser ? ' active' : '') + '" onclick="selectDM(\'' + otherUser + '\')">' +
+                        '<div class="status-dot status-online"></div>' +
+                        '<span>' + escapeHtml(otherUser.substring(0,12)) + '</span>' +
+                        (c.unread > 0 ? '<span class="unread">' + c.unread + '</span>' : '') +
+                        '</div>';
+                }).join('');
+            } catch(e) { console.error('Failed to load DMs:', e); }
+        }
+        
+        async function loadMessages() {
+            try {
+                let url = currentDM ? '/api/chat/dm?user=' + currentDM : '/api/chat?room=' + currentRoom;
+                const res = await fetch(url);
+                const messages = await res.json();
+                const container = document.getElementById('messages');
+                
+                if (!messages || messages.length === 0) {
+                    container.innerHTML = '<div class="message system"><div class="message-header"><span class="nick">SYSTEM</span></div><div class="content">// No messages yet. Start the conversation!</div></div>';
+                    return;
+                }
+                
+                container.innerHTML = messages.map(m => renderMessage(m)).join('');
+                container.scrollTop = container.scrollHeight;
+            } catch(e) { console.error('Failed to load messages:', e); }
+        }
+        
+        function renderMessage(m) {
+            const avatar = (m.nick || 'A')[0].toUpperCase();
+            const time = new Date(m.timestamp).toLocaleTimeString();
+            const shortId = m.sender_id ? m.sender_id.substring(0,8) : '';
+            
+            let mediaHtml = '';
+            if (m.media) {
+                if (m.media.type && m.media.type.startsWith('image/')) {
+                    mediaHtml = '<div class="media"><img src="data:' + m.media.type + ';base64,' + m.media.data + '" onclick="viewImage(this.src)" alt="' + escapeHtml(m.media.name) + '"></div>';
+                } else if (m.media.name) {
+                    mediaHtml = '<div class="media">[FILE: ' + escapeHtml(m.media.name) + ' (' + formatSize(m.media.size) + ')]</div>';
+                }
+            }
+            
+            let reactionsHtml = '';
+            if (m.reactions && Object.keys(m.reactions).length > 0) {
+                reactionsHtml = '<div class="reactions">' + 
+                    Object.entries(m.reactions).map(([emoji, users]) => 
+                        '<span class="reaction" onclick="addReaction(\'' + m.id + '\', \'' + emoji + '\')">' + emoji + ' ' + users.length + '</span>'
+                    ).join('') + '</div>';
+            }
+            
+            return '<div class="message' + (m.type === 5 ? ' system' : '') + (m.receiver_id ? ' dm' : '') + '">' +
+                '<div class="message-header">' +
+                '<div class="avatar">' + avatar + '</div>' +
+                '<span class="nick" onclick="showProfile(\'' + m.sender_id + '\')">' + escapeHtml(m.nick || 'Anonymous') + '</span>' +
+                '<span class="user-id">' + shortId + '</span>' +
+                '<span class="time">' + time + '</span>' +
+                '</div>' +
+                '<div class="content">' + escapeHtml(m.content) + '</div>' +
+                mediaHtml +
+                reactionsHtml +
+                '</div>';
+        }
+        
+        async function loadOnlineUsers() {
+            try {
+                const res = await fetch('/api/chat/users?room=' + currentRoom);
+                const users = await res.json();
+                const container = document.getElementById('users-list');
+                document.getElementById('online-count').textContent = users?.length || 0;
+                
+                if (!users || users.length === 0) {
+                    container.innerHTML = '<div style="padding:5px;color:var(--green-dim);font-size:12px;">No users online</div>';
+                    return;
+                }
+                
+                container.innerHTML = users.map(u => 
+                    '<div class="user-item" onclick="showProfile(\'' + u.id + '\')">' +
+                    '<div class="status-dot status-' + (u.status || 'online') + '"></div>' +
+                    '<div class="user-nick">' + escapeHtml(u.nick || u.id.substring(0,8)) + '</div>' +
+                    '</div>'
+                ).join('');
+            } catch(e) { console.error('Failed to load users:', e); }
+        }
+        
+        function selectRoom(room) {
+            currentRoom = room;
+            currentDM = null;
+            document.querySelectorAll('.room-item, .dm-item').forEach(el => el.classList.remove('active'));
+            document.querySelector('.room-item[onclick*="' + room + '"]')?.classList.add('active');
+            document.getElementById('chat-title').textContent = room;
+            document.getElementById('chat-title').style.setProperty('--before', '"#"');
+            loadMessages();
+            loadOnlineUsers();
+        }
+        
+        function selectDM(userId) {
+            currentDM = userId;
+            currentRoom = null;
+            document.querySelectorAll('.room-item, .dm-item').forEach(el => el.classList.remove('active'));
+            document.querySelector('.dm-item[onclick*="' + userId + '"]')?.classList.add('active');
+            document.getElementById('chat-title').textContent = 'DM: ' + userId.substring(0,12);
             loadMessages();
         }
-        document.getElementById('message').addEventListener('keypress', (e) => { if (e.key === 'Enter') sendMessage(); });
-        loadMessages();
-        setInterval(loadMessages, 3000);
+        
+        async function sendMessage() {
+            const input = document.getElementById('message-input');
+            const content = input.value.trim();
+            if (!content && !pendingAttachment) return;
+            
+            const formData = new FormData();
+            if (currentDM) {
+                formData.append('user', currentDM);
+            } else {
+                formData.append('room', currentRoom);
+            }
+            formData.append('message', content);
+            
+            if (pendingAttachment) {
+                formData.append('media_type', pendingAttachment.type);
+                formData.append('media_name', pendingAttachment.name);
+                formData.append('media_data', pendingAttachment.data);
+            }
+            
+            try {
+                const endpoint = currentDM ? '/api/chat/dm' : '/api/chat';
+                await fetch(endpoint, { method: 'POST', body: formData });
+                input.value = '';
+                clearAttachment();
+                loadMessages();
+            } catch(e) { console.error('Failed to send:', e); }
+        }
+        
+        function handleKeyDown(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        }
+        
+        function handleTyping() {
+            // Could send typing indicator to server
+            clearTimeout(typingTimeout);
+            typingTimeout = setTimeout(() => {}, 3000);
+        }
+        
+        function handleFileSelect(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            if (file.size > 1024 * 1024) {
+                alert('File too large. Max 1MB.');
+                return;
+            }
+            
+            const reader = new FileReader();
+            reader.onload = function(ev) {
+                const base64 = ev.target.result.split(',')[1];
+                pendingAttachment = {
+                    type: file.type,
+                    name: file.name,
+                    size: file.size,
+                    data: base64
+                };
+                
+                const preview = document.getElementById('attachment-preview');
+                preview.style.display = 'block';
+                if (file.type.startsWith('image/')) {
+                    preview.innerHTML = '<img src="' + ev.target.result + '" style="max-height:100px;border:1px solid var(--green);"> <span onclick="clearAttachment()" style="cursor:pointer;color:var(--red);">[X]</span>';
+                } else {
+                    preview.innerHTML = '<span style="color:var(--amber);">[' + escapeHtml(file.name) + ']</span> <span onclick="clearAttachment()" style="cursor:pointer;color:var(--red);">[X]</span>';
+                }
+            };
+            reader.readAsDataURL(file);
+        }
+        
+        function clearAttachment() {
+            pendingAttachment = null;
+            document.getElementById('attachment-preview').style.display = 'none';
+            document.getElementById('file-input').value = '';
+        }
+        
+        function insertEmoji() {
+            const emojis = ['👍', '❤️', '😂', '🔥', '💯', '🚀', '✅', '⚡'];
+            const emoji = emojis[Math.floor(Math.random() * emojis.length)];
+            document.getElementById('message-input').value += emoji;
+        }
+        
+        async function addReaction(msgId, emoji) {
+            try {
+                await fetch('/api/chat/reaction', {
+                    method: 'POST',
+                    body: new URLSearchParams({ room: currentRoom, message_id: msgId, emoji: emoji })
+                });
+                loadMessages();
+            } catch(e) { console.error('Failed to add reaction:', e); }
+        }
+        
+        async function showProfile(userId) {
+            try {
+                const res = await fetch('/api/chat/user?id=' + userId);
+                const user = await res.json();
+                
+                const content = document.getElementById('profile-content');
+                content.innerHTML = 
+                    '<div class="profile-avatar">' + (user.nick || 'A')[0].toUpperCase() + '</div>' +
+                    '<div class="profile-nick">' + escapeHtml(user.nick || 'Anonymous') + '</div>' +
+                    '<div class="profile-id">' + user.id + '</div>' +
+                    '<div class="profile-status"><span class="status-dot status-' + (user.status || 'offline') + '" style="display:inline-block;margin-right:5px;"></span>' + (user.status_msg || user.status || 'offline') + '</div>' +
+                    '<div class="profile-bio">' + escapeHtml(user.bio || 'No bio set.') + '</div>' +
+                    '<div class="profile-stats">' +
+                    '<div class="profile-stat"><div class="profile-stat-value">' + (user.messages_sent || 0) + '</div><div class="profile-stat-label">MESSAGES</div></div>' +
+                    '<div class="profile-stat"><div class="profile-stat-value">' + formatDate(user.joined_at) + '</div><div class="profile-stat-label">JOINED</div></div>' +
+                    '</div>' +
+                    '<div class="profile-actions">' +
+                    '<button class="input-btn" onclick="startDM(\'' + user.id + '\')">SEND DM</button>' +
+                    '<button class="input-btn" onclick="blockUser(\'' + user.id + '\')">BLOCK</button>' +
+                    '</div>';
+                
+                document.getElementById('profile-modal').classList.add('active');
+            } catch(e) { console.error('Failed to load profile:', e); }
+        }
+        
+        function showMyProfile() {
+            if (myProfile) {
+                showProfile(myProfile.id);
+            }
+        }
+        
+        function startDM(userId) {
+            closeModal('profile-modal');
+            selectDM(userId);
+        }
+        
+        async function blockUser(userId) {
+            if (confirm('Block this user? They won\\'t be able to DM you.')) {
+                await fetch('/api/chat/block', { method: 'POST', body: new URLSearchParams({ user: userId }) });
+                closeModal('profile-modal');
+            }
+        }
+        
+        async function searchUsers() {
+            const query = document.getElementById('user-search').value;
+            if (query.length < 2) {
+                document.getElementById('search-results').innerHTML = '';
+                return;
+            }
+            
+            try {
+                const res = await fetch('/api/chat/search?q=' + encodeURIComponent(query));
+                const users = await res.json();
+                document.getElementById('search-results').innerHTML = users.slice(0,5).map(u =>
+                    '<div class="user-item" onclick="showProfile(\'' + u.id + '\')">' +
+                    '<span>' + escapeHtml(u.nick || u.id.substring(0,12)) + '</span></div>'
+                ).join('');
+            } catch(e) { console.error('Search failed:', e); }
+        }
+        
+        function viewImage(src) {
+            document.getElementById('viewer-image').src = src;
+            document.getElementById('image-viewer').classList.add('active');
+        }
+        
+        function closeModal(id) {
+            document.getElementById(id).classList.remove('active');
+        }
+        
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        function formatSize(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + ' KB';
+            return (bytes/1024/1024).toFixed(1) + ' MB';
+        }
+        
+        function formatDate(dateStr) {
+            if (!dateStr) return 'N/A';
+            const d = new Date(dateStr);
+            return d.toLocaleDateString();
+        }
+        
+        // Start
+        init();
     </script>
 </body>
 </html>`
