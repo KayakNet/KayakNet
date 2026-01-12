@@ -52,7 +52,7 @@ curl -sSL https://raw.githubusercontent.com/kayaknet/kayaknet/main/scripts/deplo
 
 ```bash
 # Download
-wget https://github.com/kayaknet/kayaknet/releases/latest/download/kayakd-linux-amd64.tar.gz
+wget https://github.com/KayakNet/downloads/releases/download/v0.1.0/kayakd-v0.1.0-linux-amd64.tar.gz
 tar -xzf kayakd-linux-amd64.tar.gz
 
 # Install

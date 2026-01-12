@@ -81,7 +81,7 @@ download_binary() {
     fi
     
     log "Downloading KayakNet binary..."
-    DOWNLOAD_URL="https://github.com/kayaknet/kayaknet/releases/download/v${VERSION}/${BINARY}.tar.gz"
+    DOWNLOAD_URL="https://github.com/KayakNet/downloads/releases/download/v${VERSION}/${BINARY}.tar.gz"
     
     cd /tmp
     wget -q "$DOWNLOAD_URL" -O kayakd.tar.gz || {

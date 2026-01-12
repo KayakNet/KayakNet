@@ -31,10 +31,12 @@ A privacy-first peer-to-peer network with built-in anonymity. No central servers
 
 ### Option 1: Download Pre-built Binary
 
+Download from: **https://github.com/KayakNet/downloads/releases**
+
 ```bash
 # Download latest release
-wget https://github.com/kayaknet/kayaknet/releases/latest/download/kayakd-linux-amd64.tar.gz
-tar -xzf kayakd-linux-amd64.tar.gz
+wget https://github.com/KayakNet/downloads/releases/download/v0.1.0/kayakd-v0.1.0-linux-amd64.tar.gz
+tar -xzf kayakd-v0.1.0-linux-amd64.tar.gz
 
 # Start and connect to network
 ./kayakd -i --bootstrap 203.161.33.237:4242 --proxy --name my-node
