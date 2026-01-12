@@ -86,6 +86,10 @@ type Node struct {
 	powManager   *security.PoWManager         // Anti-Sybil proof-of-work
 	hwKeyMgr     *security.HardwareKeyManager // Hardware key support
 	localPoW     *security.ProofOfWork        // Our own PoW proof
+
+	// Gossip routing
+	seenMessages map[string]time.Time // MsgID -> first seen time (deduplication)
+	seenMu       sync.RWMutex         // Lock for seenMessages
 }
 
 // PeerConn represents a connection to a peer
@@ -120,6 +124,8 @@ type P2PMessage struct {
 	FromKey   []byte          `json:"from_key"`
 	Timestamp int64           `json:"ts"`
 	Nonce     uint64          `json:"nonce"`
+	TTL       int             `json:"ttl"`       // Time-to-live for gossip (hops remaining)
+	MsgID     string          `json:"msg_id"`    // Unique message ID for deduplication
 	Payload   json.RawMessage `json:"payload"`
 	Signature []byte          `json:"sig"`
 }
@@ -397,6 +403,7 @@ func NewNode(cfg *config.Config, name string) (*Node, error) {
 		validator:    validator,
 		powManager:   powManager,
 		hwKeyMgr:     hwKeyMgr,
+		seenMessages: make(map[string]time.Time),
 	}
 
 	// Create mixer for traffic analysis resistance
@@ -543,6 +550,7 @@ func (n *Node) Start(addr string) error {
 
 	go n.handleMessages()
 	go n.maintenance()
+	go n.cleanSeenMessages() // Cleanup old gossip message IDs
 
 	if len(n.config.DHT.BootstrapNodes) > 0 {
 		go n.bootstrap()
@@ -640,6 +648,23 @@ func (n *Node) handleMessage(from net.Addr, msg *P2PMessage) {
 		n.mixer.AddPeer(msg.From)
 	}
 
+	// Gossip routing: check if we've seen this message before
+	shouldGossip := n.isGossipMessage(msg.Type)
+	if shouldGossip && msg.MsgID != "" {
+		n.seenMu.Lock()
+		if _, seen := n.seenMessages[msg.MsgID]; seen {
+			n.seenMu.Unlock()
+			return // Already processed this message
+		}
+		n.seenMessages[msg.MsgID] = time.Now()
+		n.seenMu.Unlock()
+
+		// Forward to other peers (gossip) if TTL > 0
+		if msg.TTL > 0 {
+			go n.forwardMessage(msg, from.String())
+		}
+	}
+
 	// Handle message type
 	switch msg.Type {
 	case MsgTypePing:
@@ -668,6 +693,46 @@ func (n *Node) handleMessage(from net.Addr, msg *P2PMessage) {
 		n.handlePoWResponse(from, msg)
 	case MsgTypePoWVerified:
 		n.handlePoWVerified(msg)
+	}
+}
+
+// isGossipMessage returns true for message types that should be flooded
+func (n *Node) isGossipMessage(msgType byte) bool {
+	switch msgType {
+	case MsgTypeChat, MsgTypeListing, MsgTypeNameReg:
+		return true
+	default:
+		return false
+	}
+}
+
+// forwardMessage forwards a gossip message to all peers except the sender
+func (n *Node) forwardMessage(msg *P2PMessage, senderAddr string) {
+	// Decrement TTL
+	forwardMsg := *msg
+	forwardMsg.TTL--
+
+	data, err := json.Marshal(forwardMsg)
+	if err != nil {
+		return
+	}
+
+	n.mu.RLock()
+	peers := make([]*PeerConn, 0, len(n.connections))
+	for _, peer := range n.connections {
+		if peer.Address != senderAddr && peer.NodeID != msg.From {
+			peers = append(peers, peer)
+		}
+	}
+	n.mu.RUnlock()
+
+	// Forward to all other peers
+	for _, peer := range peers {
+		addr, err := net.ResolveUDPAddr("udp", peer.Address)
+		if err != nil {
+			continue
+		}
+		n.listener.WriteTo(data, addr)
 	}
 }
 
@@ -1132,6 +1197,87 @@ func (n *Node) broadcast(msgType byte, payload []byte) int {
 	return count
 }
 
+// broadcastGossip sends a message with gossip routing (TTL + MsgID for network-wide propagation)
+// This ensures messages reach all nodes even if they're not directly connected
+func (n *Node) broadcastGossip(msgType byte, payload []byte) int {
+	// Generate unique message ID
+	msgIDBytes := make([]byte, 16)
+	crand.Read(msgIDBytes)
+	msgID := hex.EncodeToString(msgIDBytes)
+
+	// Mark as seen locally to prevent echo
+	n.seenMu.Lock()
+	n.seenMessages[msgID] = time.Now()
+	n.seenMu.Unlock()
+
+	// Create message with TTL (5 hops max) and MsgID
+	msg := P2PMessage{
+		Type:      msgType,
+		From:      n.identity.NodeID(),
+		FromKey:   n.identity.PublicKey(),
+		Timestamp: time.Now().UnixNano(),
+		Nonce:     security.GenerateNonce(),
+		TTL:       5, // 5 hops should cover most networks
+		MsgID:     msgID,
+		Payload:   payload,
+	}
+
+	// Sign the message
+	toSign, _ := json.Marshal(struct {
+		Type      byte   `json:"type"`
+		From      string `json:"from"`
+		Timestamp int64  `json:"ts"`
+		Payload   []byte `json:"payload"`
+	}{msg.Type, msg.From, msg.Timestamp, msg.Payload})
+	msg.Signature = n.identity.Sign(toSign)
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return 0
+	}
+
+	n.mu.RLock()
+	peers := make([]*PeerConn, 0, len(n.connections))
+	for _, peer := range n.connections {
+		peers = append(peers, peer)
+	}
+	n.mu.RUnlock()
+
+	count := 0
+	for _, peer := range peers {
+		addr, err := net.ResolveUDPAddr("udp", peer.Address)
+		if err != nil {
+			continue
+		}
+		if _, err := n.listener.WriteTo(data, addr); err == nil {
+			count++
+		}
+	}
+	return count
+}
+
+// cleanSeenMessages removes old entries from seenMessages (run periodically)
+func (n *Node) cleanSeenMessages() {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-n.ctx.Done():
+			return
+		case <-ticker.C:
+			cutoff := time.Now().Add(-5 * time.Minute)
+			n.seenMu.Lock()
+			for msgID, seenTime := range n.seenMessages {
+				if seenTime.Before(cutoff) {
+					delete(n.seenMessages, msgID)
+				}
+			}
+			n.seenMu.Unlock()
+		}
+	}
+}
+
 // sendE2EEncryptedDM sends a DM with end-to-end encryption
 // Only the recipient can decrypt - not relays, not bootstrap, nobody else
 func (n *Node) sendE2EEncryptedDM(recipientID string, msg *chat.Message) error {
@@ -1189,7 +1335,7 @@ func (n *Node) sendE2EBroadcast(msgType byte, plaintext []byte) int {
 	return count
 }
 
-// broadcastListing broadcasts a marketplace listing to all peers
+// broadcastListing broadcasts a marketplace listing to all peers via gossip
 func (n *Node) broadcastListing(listing *market.Listing) {
 	data, err := listing.Marshal()
 	if err != nil {
@@ -1197,8 +1343,8 @@ func (n *Node) broadcastListing(listing *market.Listing) {
 		return
 	}
 
-	count := n.broadcast(MsgTypeListing, data)
-	log.Printf("[MARKET] Broadcast listing '%s' to %d peers", listing.Title, count)
+	count := n.broadcastGossip(MsgTypeListing, data)
+	log.Printf("[MARKET] Broadcast listing '%s' to %d peers (gossip)", listing.Title, count)
 }
 
 // bootstrap connects to bootstrap nodes
@@ -1452,15 +1598,11 @@ func (n *Node) cmdChat(room, message string) {
 		return
 	}
 
-	// Broadcast with E2E encryption to all peers
+	// Broadcast with gossip routing (propagates to entire network)
 	payload, _ := msg.Marshal()
-	count := n.sendE2EBroadcast(MsgTypeChat, payload)
+	count := n.broadcastGossip(MsgTypeChat, payload)
 
-	if n.onionRouter.CanRoute() {
-		fmt.Printf("[E2E+ONION] Sent encrypted to %d peers (triple protected)\n", count)
-	} else {
-		fmt.Printf("[E2E] Sent encrypted to %d peers (need %d+ for onion routing)\n", count, onion.MinHops)
-	}
+	fmt.Printf("[GOSSIP] Chat sent to %d peers (will propagate network-wide)\n", count)
 }
 
 func (n *Node) cmdConnect(addrStr string) {
@@ -2476,10 +2618,10 @@ func (h *Homepage) handleChat(w http.ResponseWriter, r *http.Request) {
 			// Send locally
 			chatMsg, _ := h.node.chatMgr.SendMessageWithMedia(room, message, media)
 
-			// Broadcast with E2E encryption to all peers
+			// Broadcast with gossip routing (propagates network-wide)
 			if chatMsg != nil {
 				payload, _ := chatMsg.Marshal()
-				h.node.sendE2EBroadcast(MsgTypeChat, payload)
+				h.node.broadcastGossip(MsgTypeChat, payload)
 			}
 		}
 		w.WriteHeader(http.StatusOK)
