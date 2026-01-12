@@ -12,7 +12,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -200,192 +199,6 @@ func (h *Homepage) Port() int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return h.port
-}
-
-// populateSampleListings adds demo listings from various pseudonymous sellers
-func populateSampleListings(m *market.Marketplace) {
-	// Sample listings with images (using placeholder service or data URIs)
-	samples := []struct {
-		title, desc, category string
-		price                 int64
-		currency, image       string
-		seller, sellerID      string
-	}{
-		{
-			"Secure VPN Config Generator",
-			"Generate custom WireGuard and OpenVPN configs optimized for privacy. Includes killswitch settings and DNS leak protection.",
-			"software",
-			50, "KNT",
-			"https://picsum.photos/seed/vpn/400/300",
-			"CipherPunk", "node_cipherpunk_001",
-		},
-		{
-			"Privacy-Focused Linux ISO",
-			"Custom hardened Linux distribution with pre-configured Tor, encrypted home, and security tools. Based on Debian.",
-			"software",
-			0, "KNT",
-			"https://picsum.photos/seed/linux/400/300",
-			"TuxMaster", "node_tuxmaster_002",
-		},
-		{
-			"Encrypted Cloud Storage - 100GB",
-			"Zero-knowledge encrypted storage. Your keys, your data. Accessible via KayakNet only. 1 year subscription.",
-			"services",
-			200, "KNT",
-			"https://picsum.photos/seed/cloud/400/300",
-			"VaultKeeper", "node_vaultkeeper_003",
-		},
-		{
-			"Anonymous Email Hosting",
-			"Private email server accessible through KayakNet. No logs, no tracking. Includes 5 aliases.",
-			"services",
-			150, "KNT",
-			"https://picsum.photos/seed/email/400/300",
-			"GhostMail", "node_ghostmail_004",
-		},
-		{
-			"Crypto Privacy Consultation",
-			"1 hour consultation on cryptocurrency privacy: mixing strategies, privacy coins, avoiding chain analysis.",
-			"consulting",
-			100, "KNT",
-			"https://picsum.photos/seed/crypto/400/300",
-			"SatoshiGhost", "node_satoshighost_005",
-		},
-		{
-			"Custom Onion Router Setup",
-			"Help setting up your own Tor relay or bridge. Includes server hardening and monitoring setup.",
-			"consulting",
-			75, "KNT",
-			"https://picsum.photos/seed/onion/400/300",
-			"RelayRunner", "node_relayrunner_006",
-		},
-		{
-			"Secure Messaging Bot Development",
-			"Custom bot development for Signal, Matrix, or XMPP. Privacy-focused, self-hosted solutions.",
-			"development",
-			300, "KNT",
-			"https://picsum.photos/seed/bot/400/300",
-			"ByteWeaver", "node_byteweaver_007",
-		},
-		{
-			"Hardware Security Key Programming",
-			"Custom firmware for YubiKey clones. FIDO2/U2F with custom attestation.",
-			"hardware",
-			250, "KNT",
-			"https://picsum.photos/seed/hardware/400/300",
-			"ChipWizard", "node_chipwizard_008",
-		},
-		{
-			"Decentralized Website Hosting",
-			"Host your .kyk website on KayakNet. Censorship-resistant, always online. 1 year hosting.",
-			"services",
-			120, "KNT",
-			"https://picsum.photos/seed/web/400/300",
-			"NetNomad", "node_netnomad_009",
-		},
-		{
-			"OSINT Training Course",
-			"10-part video course on open source intelligence gathering. Learn to investigate while staying anonymous.",
-			"education",
-			180, "KNT",
-			"https://picsum.photos/seed/osint/400/300",
-			"ShadowScout", "node_shadowscout_010",
-		},
-		{
-			"Secure Code Audit Service",
-			"Security review of your application code. Focus on cryptography, authentication, and data handling.",
-			"consulting",
-			500, "KNT",
-			"https://picsum.photos/seed/audit/400/300",
-			"BugHunter", "node_bughunter_011",
-		},
-		{
-			"Private DNS Server Setup",
-			"Set up your own encrypted DNS server. DoH/DoT support. No logging, full privacy.",
-			"services",
-			60, "KNT",
-			"https://picsum.photos/seed/dns/400/300",
-			"DNSNinja", "node_dnsninja_012",
-		},
-		{
-			"Encrypted Backup Service - 500GB",
-			"Distributed, encrypted backups across KayakNet. Data split across multiple nodes.",
-			"services",
-			350, "KNT",
-			"https://picsum.photos/seed/backup/400/300",
-			"DataVault", "node_datavault_013",
-		},
-		{
-			"Anonymous Domain Registration Guide",
-			"Complete guide to registering domains anonymously. Includes privacy-friendly registrars list.",
-			"education",
-			25, "KNT",
-			"https://picsum.photos/seed/domain/400/300",
-			"DomainGhost", "node_domainghost_014",
-		},
-		{
-			"P2P File Sharing Node Setup",
-			"Configure your own BitTorrent node with VPN, blocklists, and RSS automation.",
-			"consulting",
-			40, "KNT",
-			"https://picsum.photos/seed/torrent/400/300",
-			"SeedMaster", "node_seedmaster_015",
-		},
-		{
-			"Steganography Toolkit",
-			"Advanced tools for hiding data in images, audio, and video. Includes detection evasion techniques.",
-			"software",
-			80, "KNT",
-			"https://picsum.photos/seed/stego/400/300",
-			"HiddenByte", "node_hiddenbyte_016",
-		},
-	}
-
-	for _, s := range samples {
-		m.AddSampleListing(s.title, s.desc, s.category, s.price, s.currency, s.image, s.seller, s.sellerID)
-
-		// Add seller profile
-		m.AddSampleProfile(s.sellerID, s.seller,
-			"Trusted seller on KayakNet. Fast shipping, great communication.",
-			int64(500+rand.Intn(5000)),
-			3.5+float64(rand.Intn(15))/10.0,
-			int64(10+rand.Intn(100)))
-	}
-
-	// Add sample reviews
-	sampleReviews := []struct {
-		buyer   string
-		rating  int
-		comment string
-	}{
-		{"SilentBuyer", 5, "Excellent service! Fast delivery and exactly as described. Will buy again."},
-		{"CryptoNomad", 5, "Perfect transaction. Seller was very responsive and helpful."},
-		{"AnonUser42", 4, "Good product, shipping took a bit longer than expected but seller kept me updated."},
-		{"DarknetVet", 5, "Top seller! Been buying from them for months. Always reliable."},
-		{"PrivacyFirst", 4, "Solid product. Would recommend to others looking for privacy tools."},
-		{"SecureSeeker", 5, "Amazing quality and the seller went above and beyond to help me set it up."},
-		{"GhostRunner", 4, "Good experience overall. Product works as advertised."},
-		{"ShadowBuyer", 5, "Fast shipping, great communication. A++ seller!"},
-		{"VPNLover", 4, "Works great. Had a small issue but seller resolved it quickly."},
-		{"TorUser99", 5, "Best purchase I've made on KayakNet. Highly recommended!"},
-	}
-
-	// Add reviews to random listings
-	listings := m.Browse("")
-	for i, listing := range listings {
-		if i >= len(sampleReviews) {
-			break
-		}
-		review := sampleReviews[i%len(sampleReviews)]
-		m.AddSampleReview(listing.ID, listing.SellerID, review.buyer, review.rating, review.comment)
-		// Add a couple more reviews per listing
-		if i+3 < len(sampleReviews) {
-			m.AddSampleReview(listing.ID, listing.SellerID, sampleReviews[(i+3)%len(sampleReviews)].buyer,
-				sampleReviews[(i+3)%len(sampleReviews)].rating, sampleReviews[(i+3)%len(sampleReviews)].comment)
-		}
-	}
-
-	log.Printf("[MARKET] Added %d sample listings with reviews and profiles", len(samples))
 }
 
 func main() {
@@ -577,9 +390,6 @@ func NewNode(cfg *config.Config, name string) (*Node, error) {
 		id.Sign,
 	)
 
-	// Populate sample listings for demo
-	populateSampleListings(n.marketplace)
-
 	// Create chat manager (only accessible through network)
 	n.chatMgr = chat.NewChatManager(
 		id.NodeID(),
@@ -604,10 +414,22 @@ func NewNode(cfg *config.Config, name string) (*Node, error) {
 	n.homepage = NewHomepage(n)
 
 	// Create cryptocurrency wallet and escrow manager
-	// Configure with RPC endpoints if available (will work in demo mode otherwise)
+	// Configure wallet RPC endpoints in config.json for production
+	moneroHost := ""
+	if cfg.Crypto.Monero.Enabled && cfg.Crypto.Monero.RPCHost != "" {
+		moneroHost = fmt.Sprintf("%s:%d", cfg.Crypto.Monero.RPCHost, cfg.Crypto.Monero.RPCPort)
+	}
+	zcashHost := ""
+	if cfg.Crypto.Zcash.Enabled && cfg.Crypto.Zcash.RPCHost != "" {
+		zcashHost = fmt.Sprintf("%s:%d", cfg.Crypto.Zcash.RPCHost, cfg.Crypto.Zcash.RPCPort)
+	}
 	walletConfig := escrow.WalletConfig{
-		MoneroRPCHost: "", // Set to "127.0.0.1:18082" if running monerod
-		ZcashRPCHost:  "", // Set to "127.0.0.1:8232" if running zcashd
+		MoneroRPCHost:     moneroHost,
+		MoneroRPCUser:     cfg.Crypto.Monero.RPCUser,
+		MoneroRPCPassword: cfg.Crypto.Monero.RPCPassword,
+		ZcashRPCHost:      zcashHost,
+		ZcashRPCUser:      cfg.Crypto.Zcash.RPCUser,
+		ZcashRPCPassword:  cfg.Crypto.Zcash.RPCPassword,
 	}
 	n.cryptoWallet = escrow.NewCryptoWallet(walletConfig)
 	n.escrowMgr = escrow.NewEscrowManager(n.cryptoWallet, 2.0) // 2% platform fee
@@ -2211,10 +2033,19 @@ func (h *Homepage) handleEscrowPay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Simulate payment received (for demo mode)
-	err := h.node.escrowMgr.MarkPaymentReceived(escrowID)
+	// Check if payment was received on the blockchain
+	received, err := h.node.escrowMgr.CheckPayment(escrowID)
 	if err != nil {
-		http.Error(w, "Failed to mark payment: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "Failed to check payment: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if !received {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "Payment not yet received. Please send the exact amount to the escrow address and wait for confirmations.",
+		})
 		return
 	}
 
@@ -3342,7 +3173,6 @@ const marketplaceHTML = `<!DOCTYPE html>
                 '</div>' +
                 '<div style="margin-top:20px">' +
                 '<button class="btn" onclick="checkPaymentStatus(\'' + escrow.escrow_id + '\')">CHECK PAYMENT STATUS</button>' +
-                '<button class="btn btn-outline" style="margin-left:10px" onclick="simulatePayment(\'' + escrow.escrow_id + '\')">SIMULATE PAYMENT (DEMO)</button>' +
                 '</div>' +
                 '</div>';
             showModal('order-modal');
@@ -3360,21 +3190,6 @@ const marketplaceHTML = `<!DOCTYPE html>
                 alert('Payment not yet received. Please send ' + status.amount + ' ' + status.currency + ' to the address shown.');
             } else {
                 alert('Order status: ' + status.state.toUpperCase());
-            }
-        }
-        
-        async function simulatePayment(escrowId) {
-            const res = await fetch('/api/escrow/pay', {
-                method: 'POST',
-                body: new URLSearchParams({ escrow_id: escrowId })
-            });
-            
-            if (res.ok) {
-                alert('Payment simulated! Funds are now in escrow.');
-                closeModal('order-modal');
-                loadOrders('buying');
-            } else {
-                alert('Failed to simulate payment');
             }
         }
         

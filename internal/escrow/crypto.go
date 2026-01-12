@@ -91,11 +91,13 @@ func NewCryptoWallet(config WalletConfig) *CryptoWallet {
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 	
-	// Enable both currencies by default (demo mode if RPC not configured)
-	// When RPC is configured, real transactions will be used
-	// Otherwise, demo addresses are generated
-	w.enabled[CryptoXMR] = true
-	w.enabled[CryptoZEC] = true
+	// Only enable currencies when RPC is properly configured
+	if config.MoneroRPCHost != "" {
+		w.enabled[CryptoXMR] = true
+	}
+	if config.ZcashRPCHost != "" {
+		w.enabled[CryptoZEC] = true
+	}
 	
 	return w
 }
@@ -152,9 +154,8 @@ func (w *CryptoWallet) GenerateEscrowAddress(orderID string, currency CryptoType
 
 // generateMoneroAddress creates a Monero subaddress for escrow
 func (w *CryptoWallet) generateMoneroAddress(orderID string) (*PaymentAddress, error) {
-	// If no RPC host configured, use demo mode directly
 	if w.config.MoneroRPCHost == "" {
-		return w.generateDemoAddress(CryptoXMR, orderID)
+		return nil, ErrWalletNotConfigured
 	}
 	
 	// Call monero-wallet-rpc to create subaddress
@@ -164,8 +165,7 @@ func (w *CryptoWallet) generateMoneroAddress(orderID string) (*PaymentAddress, e
 	})
 	
 	if err != nil {
-		// If RPC fails, generate a placeholder address for demo
-		return w.generateDemoAddress(CryptoXMR, orderID)
+		return nil, fmt.Errorf("monero RPC error: %w", err)
 	}
 	
 	address, _ := result["address"].(string)
@@ -182,49 +182,21 @@ func (w *CryptoWallet) generateMoneroAddress(orderID string) (*PaymentAddress, e
 
 // generateZcashAddress creates a Zcash shielded address for escrow
 func (w *CryptoWallet) generateZcashAddress(orderID string) (*PaymentAddress, error) {
-	// If no RPC host configured, use demo mode directly
 	if w.config.ZcashRPCHost == "" {
-		return w.generateDemoAddress(CryptoZEC, orderID)
+		return nil, ErrWalletNotConfigured
 	}
 	
 	// Call zcash-cli z_getnewaddress
 	result, err := w.zcashRPC("z_getnewaddress", []interface{}{"sapling"})
 	
 	if err != nil {
-		// If RPC fails, generate a placeholder address for demo
-		return w.generateDemoAddress(CryptoZEC, orderID)
+		return nil, fmt.Errorf("zcash RPC error: %w", err)
 	}
 	
 	address, _ := result.(string)
 	
 	return &PaymentAddress{
 		Currency:  CryptoZEC,
-		Address:   address,
-		CreatedAt: time.Now(),
-		ExpiresAt: time.Now().Add(24 * time.Hour),
-	}, nil
-}
-
-// generateDemoAddress creates a demo address when wallet is not connected
-func (w *CryptoWallet) generateDemoAddress(currency CryptoType, orderID string) (*PaymentAddress, error) {
-	// Generate a realistic-looking demo address
-	// Monero addresses are 95 chars, Zcash shielded (sapling) are 78 chars
-	randBytes := make([]byte, 64) // 64 bytes = 128 hex chars, enough for any address
-	rand.Read(randBytes)
-	hexStr := hex.EncodeToString(randBytes)
-	
-	var address string
-	switch currency {
-	case CryptoXMR:
-		// Monero mainnet addresses start with 4 and are 95 chars total
-		address = "4" + hexStr[:94]
-	case CryptoZEC:
-		// Zcash shielded (sapling) addresses start with zs and are 78 chars total
-		address = "zs" + hexStr[:76]
-	}
-	
-	return &PaymentAddress{
-		Currency:  currency,
 		Address:   address,
 		CreatedAt: time.Now(),
 		ExpiresAt: time.Now().Add(24 * time.Hour),
@@ -255,14 +227,13 @@ func (w *CryptoWallet) CheckPayment(orderID string, expectedAmount float64) (*Pa
 func (w *CryptoWallet) checkMoneroPayment(orderID string, addr *PaymentAddress, expectedAmount float64) (*Payment, error) {
 	// Query incoming transfers
 	result, err := w.moneroRPC("get_transfers", map[string]interface{}{
-		"in":             true,
-		"pending":        true,
+		"in":               true,
+		"pending":          true,
 		"filter_by_height": false,
 	})
 	
 	if err != nil {
-		// Demo mode - simulate payment after short delay
-		return w.simulatePayment(orderID, addr, expectedAmount)
+		return nil, fmt.Errorf("monero RPC error: %w", err)
 	}
 	
 	// Parse transfers and find matching payment
@@ -310,8 +281,7 @@ func (w *CryptoWallet) checkZcashPayment(orderID string, addr *PaymentAddress, e
 	result, err := w.zcashRPC("z_listreceivedbyaddress", []interface{}{addr.Address, 0})
 	
 	if err != nil {
-		// Demo mode
-		return w.simulatePayment(orderID, addr, expectedAmount)
+		return nil, fmt.Errorf("zcash RPC error: %w", err)
 	}
 	
 	// Parse received transactions
@@ -343,52 +313,6 @@ func (w *CryptoWallet) checkZcashPayment(orderID string, addr *PaymentAddress, e
 	}
 	
 	return nil, ErrPaymentNotFound
-}
-
-// simulatePayment creates a simulated payment for demo mode
-func (w *CryptoWallet) simulatePayment(orderID string, addr *PaymentAddress, expectedAmount float64) (*Payment, error) {
-	// Check if we already have a simulated payment
-	w.mu.RLock()
-	for _, p := range w.payments {
-		if p.OrderID == orderID {
-			w.mu.RUnlock()
-			return p, nil
-		}
-	}
-	w.mu.RUnlock()
-	
-	return nil, ErrPaymentNotFound
-}
-
-// SimulatePaymentReceived simulates receiving a payment (for demo/testing)
-func (w *CryptoWallet) SimulatePaymentReceived(orderID string, amount float64) (*Payment, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	
-	addr, ok := w.addresses[orderID]
-	if !ok {
-		return nil, ErrPaymentNotFound
-	}
-	
-	txBytes := make([]byte, 32)
-	rand.Read(txBytes)
-	
-	payment := &Payment{
-		ID:            generatePaymentID(),
-		OrderID:       orderID,
-		Currency:      addr.Currency,
-		Address:       addr.Address,
-		Amount:        amount,
-		AmountAtomic:  uint64(amount * 1e12),
-		TxID:          hex.EncodeToString(txBytes),
-		Confirmations: 10,
-		Status:        "confirmed",
-		CreatedAt:     time.Now(),
-		ConfirmedAt:   time.Now(),
-	}
-	
-	w.payments[payment.ID] = payment
-	return payment, nil
 }
 
 // ReleasePayment releases funds to seller

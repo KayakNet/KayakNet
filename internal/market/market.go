@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"math/rand"
 	"sort"
 	"strings"
 	"sync"
@@ -341,35 +340,7 @@ func (m *Marketplace) CreateListingFull(title, description, category string, pri
 	return listing, nil
 }
 
-// AddSampleListing adds a sample listing (for demo/bootstrap purposes)
-func (m *Marketplace) AddSampleListing(title, description, category string, price int64, currency, image, sellerName, sellerID string) {
-	listing := &Listing{
-		ID:          generateID(),
-		Title:       title,
-		Description: description,
-		Category:    category,
-		Price:       price,
-		Currency:    currency,
-		Image:       image,
-		SellerID:    sellerID,
-		SellerName:  sellerName,
-		SellerKey:   nil, // Sample listings are unsigned
-		CreatedAt:   time.Now().Add(-time.Duration(rand.Intn(72)) * time.Hour), // Random past time
-		UpdatedAt:   time.Now(),
-		ExpiresAt:   time.Now().Add(30 * 24 * time.Hour),
-		Active:      true,
-		Views:       int64(rand.Intn(500) + 10),
-		Purchases:   int64(rand.Intn(50)),
-		Rating:      3.5 + float64(rand.Intn(15))/10.0,
-		ReviewCount: int64(rand.Intn(30)),
-	}
-
-	m.mu.Lock()
-	m.listings[listing.ID] = listing
-	m.mu.Unlock()
-}
-
-// ListingCount returns the number of listings (for debugging)
+// ListingCount returns the number of listings
 func (m *Marketplace) ListingCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -1500,59 +1471,3 @@ func (m *Marketplace) IncrementViews(listingID string) {
 }
 
 // =====================
-// SAMPLE DATA HELPERS
-// =====================
-
-// AddSampleReview adds a sample review for demo purposes
-func (m *Marketplace) AddSampleReview(listingID, sellerID, buyerName string, rating int, comment string) {
-	review := &Review{
-		ID:            generateID(),
-		ListingID:     listingID,
-		SellerID:      sellerID,
-		BuyerID:       generateID(),
-		BuyerName:     buyerName,
-		Rating:        rating,
-		Comment:       comment,
-		Quality:       rating,
-		Shipping:      rating,
-		Communication: rating,
-		CreatedAt:     time.Now().Add(-time.Duration(rand.Intn(168)) * time.Hour),
-		Verified:      true,
-	}
-	
-	m.mu.Lock()
-	m.reviews[listingID] = append(m.reviews[listingID], review)
-	m.sellerReviews[sellerID] = append(m.sellerReviews[sellerID], review)
-	m.mu.Unlock()
-}
-
-// AddSampleProfile adds a sample seller profile
-func (m *Marketplace) AddSampleProfile(sellerID, name, bio string, sales int64, rating float64, reviews int64) {
-	profile := &SellerProfile{
-		ID:           sellerID,
-		Name:         name,
-		Bio:          bio,
-		JoinedAt:     time.Now().Add(-time.Duration(rand.Intn(365)) * 24 * time.Hour),
-		LastSeen:     time.Now().Add(-time.Duration(rand.Intn(24)) * time.Hour),
-		TotalSales:   sales,
-		TotalOrders:  sales / 100,
-		Rating:       rating,
-		ReviewCount:  reviews,
-		ResponseTime: []string{"< 1 hour", "< 6 hours", "< 24 hours"}[rand.Intn(3)],
-		ShipTime:     []string{"Same day", "1-2 days", "2-5 days"}[rand.Intn(3)],
-		DisputeRate:  float64(rand.Intn(5)) / 100,
-	}
-	
-	if rating >= 4.5 && sales > 1000 {
-		profile.TrustedSeller = true
-		profile.Badges = append(profile.Badges, "trusted", "top_seller")
-	}
-	if reviews > 50 {
-		profile.Badges = append(profile.Badges, "established")
-	}
-	
-	m.mu.Lock()
-	m.profiles[sellerID] = profile
-	m.mu.Unlock()
-}
-

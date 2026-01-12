@@ -250,40 +250,6 @@ func (m *EscrowManager) CheckPayment(escrowID string) (bool, error) {
 	return false, nil
 }
 
-// MarkPaymentReceived manually marks payment as received (for demo/testing)
-func (m *EscrowManager) MarkPaymentReceived(escrowID string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	
-	escrow, ok := m.escrows[escrowID]
-	if !ok {
-		return ErrEscrowNotFound
-	}
-	
-	if escrow.State != StateCreated {
-		return ErrAlreadyFunded
-	}
-	
-	// Simulate payment
-	payment, err := m.wallet.SimulatePaymentReceived(escrow.OrderID, escrow.Amount)
-	if err != nil {
-		return err
-	}
-	
-	escrow.State = StateFunded
-	escrow.FundedAt = time.Now()
-	escrow.PaymentID = payment.ID
-	escrow.TxID = payment.TxID
-	escrow.AutoReleaseAt = time.Now().Add(14 * 24 * time.Hour)
-	escrow.AutoReleaseEnabled = true
-	
-	if m.onStateChange != nil {
-		m.onStateChange(escrow, StateFunded)
-	}
-	
-	return nil
-}
-
 // MarkShipped seller marks order as shipped
 func (m *EscrowManager) MarkShipped(escrowID, trackingInfo string) error {
 	m.mu.Lock()
