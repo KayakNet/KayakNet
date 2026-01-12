@@ -611,7 +611,7 @@ func NewNode(cfg *config.Config, name string) (*Node, error) {
 	}
 	n.cryptoWallet = escrow.NewCryptoWallet(walletConfig)
 	n.escrowMgr = escrow.NewEscrowManager(n.cryptoWallet, 2.0) // 2% platform fee
-	
+
 	// Start escrow maintenance goroutine
 	go func() {
 		ticker := time.NewTicker(time.Minute)
@@ -2105,7 +2105,7 @@ func (h *Homepage) handleEscrowCreate(w http.ResponseWriter, r *http.Request) {
 
 	// Get seller's address (in production, this would be stored with the listing)
 	sellerAddress := ""
-	
+
 	// Create escrow
 	params := escrow.EscrowParams{
 		OrderID:       generateOrderID(),
@@ -2205,7 +2205,7 @@ func (h *Homepage) handleEscrowPay(w http.ResponseWriter, r *http.Request) {
 	}
 
 	escrowID := r.FormValue("escrow_id")
-	
+
 	if h.node == nil || escrowID == "" {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
@@ -2233,7 +2233,7 @@ func (h *Homepage) handleEscrowShip(w http.ResponseWriter, r *http.Request) {
 
 	escrowID := r.FormValue("escrow_id")
 	trackingInfo := r.FormValue("tracking_info")
-	
+
 	if h.node == nil || escrowID == "" {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
@@ -2259,7 +2259,7 @@ func (h *Homepage) handleEscrowRelease(w http.ResponseWriter, r *http.Request) {
 	}
 
 	escrowID := r.FormValue("escrow_id")
-	
+
 	if h.node == nil || escrowID == "" {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
@@ -2286,7 +2286,7 @@ func (h *Homepage) handleEscrowDispute(w http.ResponseWriter, r *http.Request) {
 
 	escrowID := r.FormValue("escrow_id")
 	reason := r.FormValue("reason")
-	
+
 	if h.node == nil || escrowID == "" || reason == "" {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
@@ -2312,7 +2312,7 @@ func (h *Homepage) handleMyEscrows(w http.ResponseWriter, r *http.Request) {
 	}
 
 	role := r.URL.Query().Get("role") // "buyer" or "seller"
-	
+
 	var escrows []*escrow.Escrow
 	if role == "seller" {
 		escrows = h.node.escrowMgr.GetSellerEscrows(h.node.identity.NodeID())

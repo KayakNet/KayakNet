@@ -1,0 +1,40 @@
+[Unit]
+Description=KayakNet Vendor Node
+Documentation=https://github.com/kayaknet/kayaknet
+After=network-online.target monero-wallet-rpc.service zcashd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kayaknet
+Group=kayaknet
+WorkingDirectory=/opt/kayaknet
+ExecStart=/opt/kayaknet/kayakd --config /etc/kayaknet/config.json
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=0
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/kayaknet /var/log/kayaknet
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+# Resource limits
+LimitNOFILE=65535
+LimitNPROC=4096
+MemoryMax=4G
+CPUQuota=300%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kayaknet
+
+[Install]
+WantedBy=multi-user.target
+

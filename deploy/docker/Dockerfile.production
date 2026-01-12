@@ -1,0 +1,61 @@
+# KayakNet Production Dockerfile
+# Multi-stage build for minimal image size
+
+FROM golang:1.21-alpine AS builder
+
+WORKDIR /build
+
+# Install build dependencies
+RUN apk add --no-cache git ca-certificates tzdata
+
+# Copy go mod files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source
+COPY . .
+
+# Build with optimizations
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -ldflags="-s -w -X main.Version=production" \
+    -o kayakd \
+    ./cmd/kayakd
+
+# Final minimal image
+FROM alpine:3.19
+
+# Security: run as non-root
+RUN addgroup -g 1000 kayaknet && \
+    adduser -u 1000 -G kayaknet -s /bin/sh -D kayaknet
+
+# Install runtime dependencies
+RUN apk add --no-cache ca-certificates tzdata
+
+# Create directories
+RUN mkdir -p /opt/kayaknet /var/lib/kayaknet /var/log/kayaknet && \
+    chown -R kayaknet:kayaknet /opt/kayaknet /var/lib/kayaknet /var/log/kayaknet
+
+# Copy binary
+COPY --from=builder /build/kayakd /opt/kayaknet/kayakd
+
+# Set working directory
+WORKDIR /opt/kayaknet
+
+# Switch to non-root user
+USER kayaknet
+
+# Default ports
+# 4242 - P2P UDP
+# 8118 - HTTP Proxy
+# 8119 - SOCKS5 Proxy
+# 8080 - Homepage (internal)
+EXPOSE 4242/udp 8118 8119
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD wget -q --spider http://127.0.0.1:8080/ || exit 1
+
+# Default command
+ENTRYPOINT ["/opt/kayaknet/kayakd"]
+CMD ["--config", "/etc/kayaknet/config.json"]
+

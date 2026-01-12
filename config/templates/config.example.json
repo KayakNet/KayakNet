@@ -1,0 +1,101 @@
+{
+  "_comment": "KayakNet Configuration Example - Copy and customize for your deployment",
+  
+  "node": {
+    "name": "my-kayaknet-node",
+    "data_dir": "/var/lib/kayaknet",
+    "identity_file": "/var/lib/kayaknet/identity.json",
+    "mode": "user"
+  },
+  
+  "dht": {
+    "k": 20,
+    "alpha": 3,
+    "record_ttl": "24h",
+    "refresh_interval": "1h",
+    "bootstrap_nodes": [
+      "203.161.33.237:4242"
+    ]
+  },
+  
+  "pubsub": {
+    "max_topics": 100,
+    "max_peers_per_topic": 50,
+    "message_buffer_size": 1000,
+    "rate_limit_window": "1s",
+    "rate_limit_messages": 100
+  },
+  
+  "transport": {
+    "udp": {
+      "enabled": true,
+      "listen_addr": "0.0.0.0:4242",
+      "max_packet_size": 65535
+    },
+    "tcp": {
+      "enabled": false,
+      "listen_addr": "0.0.0.0:4243"
+    },
+    "tor": {
+      "enabled": false,
+      "proxy_addr": "127.0.0.1:9050"
+    },
+    "i2p": {
+      "enabled": false,
+      "sam_addr": "127.0.0.1:7656"
+    }
+  },
+  
+  "security": {
+    "rate_limit_window": "1s",
+    "rate_limit_messages": 100,
+    "ban_threshold": 10,
+    "initial_ban_time": "5m",
+    "max_ban_time": "24h",
+    "onion_hops": 3,
+    "circuit_timeout": "30s",
+    "padding_size": 2048,
+    "batch_interval": "100ms",
+    "max_delay": "500ms",
+    "dummy_traffic_rate": 0.1
+  },
+  
+  "proxy": {
+    "enabled": true,
+    "http_port": 8118,
+    "socks5_port": 8119,
+    "homepage_port": 8080,
+    "allow_external": false,
+    "bind_address": "127.0.0.1"
+  },
+  
+  "crypto": {
+    "monero": {
+      "enabled": false,
+      "rpc_host": "127.0.0.1",
+      "rpc_port": 18082,
+      "rpc_user": "",
+      "rpc_password": "",
+      "wallet_file": "",
+      "network": "mainnet"
+    },
+    "zcash": {
+      "enabled": false,
+      "rpc_host": "127.0.0.1",
+      "rpc_port": 8232,
+      "rpc_user": "",
+      "rpc_password": "",
+      "network": "mainnet"
+    }
+  },
+  
+  "logging": {
+    "level": "info",
+    "file": "/var/log/kayaknet/kayakd.log",
+    "max_size_mb": 100,
+    "max_backups": 3,
+    "max_age_days": 30,
+    "compress": true
+  }
+}
+

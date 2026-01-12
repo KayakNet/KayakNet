@@ -1,0 +1,155 @@
+# KayakNet Production Docker Compose
+# Usage: docker-compose -f docker-compose.production.yml up -d
+
+version: '3.8'
+
+services:
+  # Bootstrap Node (run on dedicated server)
+  kayaknet-bootstrap:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.production
+    image: kayaknet/kayakd:latest
+    container_name: kayaknet-bootstrap
+    restart: always
+    ports:
+      - "4242:4242/udp"
+    volumes:
+      - bootstrap-data:/var/lib/kayaknet
+      - ./config/bootstrap.json:/etc/kayaknet/config.json:ro
+    environment:
+      - KAYAKNET_MODE=bootstrap
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    profiles:
+      - bootstrap
+
+  # Vendor Node (with crypto wallets)
+  kayaknet-vendor:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.production
+    image: kayaknet/kayakd:latest
+    container_name: kayaknet-vendor
+    restart: always
+    ports:
+      - "4242:4242/udp"
+      - "127.0.0.1:8118:8118"  # HTTP Proxy (localhost only)
+      - "127.0.0.1:8119:8119"  # SOCKS5 Proxy (localhost only)
+    volumes:
+      - vendor-data:/var/lib/kayaknet
+      - ./config/vendor.json:/etc/kayaknet/config.json:ro
+    environment:
+      - KAYAKNET_MODE=vendor
+    depends_on:
+      - monero-wallet
+      - zcash-node
+    deploy:
+      resources:
+        limits:
+          cpus: '3'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+    profiles:
+      - vendor
+
+  # User Node (basic)
+  kayaknet-user:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.production
+    image: kayaknet/kayakd:latest
+    container_name: kayaknet-user
+    restart: unless-stopped
+    ports:
+      - "4242:4242/udp"
+      - "127.0.0.1:8118:8118"
+      - "127.0.0.1:8119:8119"
+    volumes:
+      - user-data:/var/lib/kayaknet
+      - ./config/user.json:/etc/kayaknet/config.json:ro
+    environment:
+      - KAYAKNET_MODE=user
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "2"
+    profiles:
+      - user
+
+  # Monero Wallet RPC (for vendors)
+  monero-wallet:
+    image: monero-wallet-rpc:latest
+    container_name: kayaknet-monero
+    restart: always
+    volumes:
+      - monero-wallet:/wallet
+    environment:
+      - WALLET_FILE=/wallet/kayaknet
+      - RPC_BIND_IP=0.0.0.0
+      - RPC_BIND_PORT=18082
+    expose:
+      - "18082"
+    profiles:
+      - vendor
+
+  # Zcash Node (for vendors)
+  zcash-node:
+    image: electriccoinco/zcashd:latest
+    container_name: kayaknet-zcash
+    restart: always
+    volumes:
+      - zcash-data:/root/.zcash
+      - ./config/zcash.conf:/root/.zcash/zcash.conf:ro
+    expose:
+      - "8232"
+    profiles:
+      - vendor
+
+volumes:
+  bootstrap-data:
+  vendor-data:
+  user-data:
+  monero-wallet:
+  zcash-data:
+
+networks:
+  default:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+

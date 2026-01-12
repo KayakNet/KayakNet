@@ -1,0 +1,24 @@
+[Unit]
+Description=KayakNet User Node
+Documentation=https://github.com/kayaknet/kayaknet
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.kayaknet/kayakd --config %h/.kayaknet/config.json
+Restart=on-failure
+RestartSec=10
+
+# Resource limits
+LimitNOFILE=4096
+MemoryMax=512M
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kayaknet
+
+[Install]
+WantedBy=default.target
+

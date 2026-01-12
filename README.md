@@ -29,7 +29,18 @@ A privacy-first peer-to-peer network with built-in anonymity. No central servers
 
 ## Quick Start
 
-### Build
+### Option 1: Download Pre-built Binary
+
+```bash
+# Download latest release
+wget https://github.com/kayaknet/kayaknet/releases/latest/download/kayakd-linux-amd64.tar.gz
+tar -xzf kayakd-linux-amd64.tar.gz
+
+# Start and connect to network
+./kayakd -i --bootstrap 203.161.33.237:4242 --proxy --name my-node
+```
+
+### Option 2: Build from Source
 
 ```bash
 # Build the node daemon
@@ -39,14 +50,23 @@ go build -o kayakd ./cmd/kayakd
 go build -o kayakctl ./cmd/kayakctl
 ```
 
-### Start Your First Node (Bootstrap)
+### Connect to the Public Network
+
+```bash
+# Connect to the KayakNet public network
+./kayakd -i --bootstrap 203.161.33.237:4242 --proxy --name my-node
+```
+
+Then open your browser to `http://home.kyk` (after configuring proxy).
+
+### Start Your Own Network (Bootstrap)
 
 ```bash
 # Start a bootstrap node with interactive mode
 ./kayakd -i --listen 0.0.0.0:4242 --name my-first-node
 ```
 
-### Join the Network
+### Join a Network
 
 ```bash
 # On another machine (or terminal), connect to your bootstrap node
@@ -394,6 +414,64 @@ As more nodes join:
 - **Minimum 3 peers** for onion routing
 - More peers = better anonymity
 - Traffic analysis resistance always active
+
+## Production Deployment
+
+### Quick Deploy (Linux)
+
+```bash
+# Deploy as a user node
+curl -sSL https://raw.githubusercontent.com/kayaknet/kayaknet/main/scripts/deploy-production.sh | sudo bash -s user
+
+# Deploy as a vendor node (with crypto wallets)
+curl -sSL https://raw.githubusercontent.com/kayaknet/kayaknet/main/scripts/deploy-production.sh | sudo bash -s vendor
+
+# Deploy as a bootstrap node
+curl -sSL https://raw.githubusercontent.com/kayaknet/kayaknet/main/scripts/deploy-production.sh | sudo bash -s bootstrap
+```
+
+### Service Management
+
+```bash
+# Start/stop/restart
+sudo systemctl start kayaknet
+sudo systemctl stop kayaknet
+sudo systemctl restart kayaknet
+
+# View logs
+journalctl -u kayaknet -f
+```
+
+### Configuration
+
+Configuration templates are in `config/templates/`:
+- `bootstrap.json` - For bootstrap nodes
+- `vendor.json` - For marketplace vendors
+- `user.json` - For regular users
+
+Copy to `/etc/kayaknet/config.json` and customize.
+
+### Cryptocurrency Setup (Vendors)
+
+```bash
+# Setup Monero wallet
+sudo ./scripts/wallet-setup/setup-monero.sh mainnet
+
+# Setup Zcash wallet
+sudo ./scripts/wallet-setup/setup-zcash.sh mainnet
+```
+
+### Docker
+
+```bash
+# User node
+docker-compose -f deploy/docker/docker-compose.production.yml --profile user up -d
+
+# Vendor node with crypto wallets
+docker-compose -f deploy/docker/docker-compose.production.yml --profile vendor up -d
+```
+
+See [docs/PRODUCTION.md](docs/PRODUCTION.md) for complete deployment guide.
 
 ## Development
 
