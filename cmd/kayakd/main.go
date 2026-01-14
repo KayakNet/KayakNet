@@ -3964,8 +3964,9 @@ const marketplaceHTML = `<!DOCTYPE html>
         .term-header { background: var(--green); color: var(--bg); padding: 5px 15px; font-size: 14px; display: flex; justify-content: space-between; }
         .term-body { padding: 20px; }
         header { display: flex; justify-content: space-between; align-items: center; padding: 15px 0; border-bottom: 1px dashed var(--border); margin-bottom: 20px; }
-        .logo { font-size: 24px; color: var(--green); text-decoration: none; text-shadow: 0 0 10px var(--green-glow); }
-        .logo::before { content: "["; } .logo::after { content: "]"; }
+        .logo { font-size: 24px; color: var(--green); text-decoration: none; text-shadow: 0 0 10px var(--green-glow); display: flex; align-items: center; gap: 8px; }
+        .logo img { height: 32px; width: auto; }
+        .logo-text::before { content: "["; color: var(--green-dim); } .logo-text::after { content: "]"; color: var(--green-dim); }
         nav { display: flex; gap: 15px; align-items: center; }
         nav a { color: var(--green-dim); text-decoration: none; padding: 5px 10px; border: 1px solid transparent; }
         nav a:hover, nav a.active { color: var(--green); border-color: var(--green); }
@@ -4734,8 +4735,9 @@ const chatPageHTML = `<!DOCTYPE html>
         .term-header { background: var(--green); color: var(--bg); padding: 5px 15px; font-size: 14px; flex-shrink: 0; display: flex; justify-content: space-between; align-items: center; }
         .term-body { padding: 10px; flex: 1; display: flex; flex-direction: column; min-height: 0; }
         header { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px dashed var(--border); flex-shrink: 0; }
-        .logo { font-size: 20px; color: var(--green); text-decoration: none; text-shadow: 0 0 10px var(--green-glow); }
-        .logo::before { content: "["; } .logo::after { content: "]"; }
+        .logo { font-size: 20px; color: var(--green); text-decoration: none; text-shadow: 0 0 10px var(--green-glow); display: flex; align-items: center; gap: 8px; }
+        .logo img { height: 28px; width: auto; }
+        .logo-text::before { content: "["; color: var(--green-dim); } .logo-text::after { content: "]"; color: var(--green-dim); }
         nav { display: flex; gap: 10px; }
         nav a { color: var(--green-dim); text-decoration: none; padding: 3px 8px; border: 1px solid transparent; font-size: 14px; }
         nav a:hover, nav a.active { color: var(--green); border-color: var(--green); }
@@ -5415,8 +5417,9 @@ const domainsPageHTML = `<!DOCTYPE html>
         .term-header { background: var(--green); color: var(--bg); padding: 5px 15px; font-size: 14px; }
         .term-body { padding: 20px; }
         header { display: flex; justify-content: space-between; align-items: center; padding: 15px 0; border-bottom: 1px dashed var(--border); margin-bottom: 20px; }
-        .logo { font-size: 24px; color: var(--green); text-decoration: none; text-shadow: 0 0 10px var(--green-glow); }
-        .logo::before { content: "["; } .logo::after { content: "]"; }
+        .logo { font-size: 24px; color: var(--green); text-decoration: none; text-shadow: 0 0 10px var(--green-glow); display: flex; align-items: center; gap: 8px; }
+        .logo img { height: 32px; width: auto; }
+        .logo-text::before { content: "["; color: var(--green-dim); } .logo-text::after { content: "]"; color: var(--green-dim); }
         nav { display: flex; gap: 15px; }
         nav a { color: var(--green-dim); text-decoration: none; padding: 5px 10px; border: 1px solid transparent; }
         nav a:hover, nav a.active { color: var(--green); border-color: var(--green); }
@@ -5761,8 +5764,9 @@ const networkPageHTML = `<!DOCTYPE html>
         .term-header { background: var(--green); color: var(--bg); padding: 5px 15px; font-size: 14px; }
         .term-body { padding: 20px; }
         header { display: flex; justify-content: space-between; align-items: center; padding: 15px 0; border-bottom: 1px dashed var(--border); margin-bottom: 20px; }
-        .logo { font-size: 24px; color: var(--green); text-decoration: none; text-shadow: 0 0 10px var(--green-glow); }
-        .logo::before { content: "["; } .logo::after { content: "]"; }
+        .logo { font-size: 24px; color: var(--green); text-decoration: none; text-shadow: 0 0 10px var(--green-glow); display: flex; align-items: center; gap: 8px; }
+        .logo img { height: 32px; width: auto; }
+        .logo-text::before { content: "["; color: var(--green-dim); } .logo-text::after { content: "]"; color: var(--green-dim); }
         nav { display: flex; gap: 15px; }
         nav a { color: var(--green-dim); text-decoration: none; padding: 5px 10px; border: 1px solid transparent; }
         nav a:hover, nav a.active { color: var(--green); border-color: var(--green); }
