@@ -214,6 +214,7 @@ func (h *Homepage) Start(port int) error {
 	mux.HandleFunc("/chat", h.handleChatPage)
 	mux.HandleFunc("/domains", h.handleDomainsPage)
 	mux.HandleFunc("/network", h.handleNetworkPage)
+	mux.HandleFunc("/assets/logo.png", h.handleLogo)
 
 	h.server = &http.Server{
 		Addr:    fmt.Sprintf("127.0.0.1:%d", port),
@@ -3599,6 +3600,28 @@ func (h *Homepage) handleNetworkPage(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(networkPageHTML))
 }
 
+// handleLogo serves the KayakNet logo
+func (h *Homepage) handleLogo(w http.ResponseWriter, r *http.Request) {
+	// Try to read logo from assets directory
+	logoPath := "assets/logo/kayaknet-logo.png"
+	data, err := os.ReadFile(logoPath)
+	if err != nil {
+		// Fallback: serve a simple SVG logo
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100">
+			<ellipse cx="100" cy="60" rx="80" ry="25" fill="#228B22" stroke="#006400" stroke-width="3"/>
+			<ellipse cx="100" cy="55" rx="70" ry="15" fill="#8B4513"/>
+			<line x1="140" y1="20" x2="80" y2="90" stroke="#CD5C5C" stroke-width="8" stroke-linecap="round"/>
+			<ellipse cx="75" cy="95" rx="15" ry="8" fill="#CD5C5C"/>
+			<text x="100" y="65" text-anchor="middle" font-family="monospace" font-size="14" fill="#004400" font-weight="bold">KayakNet</text>
+		</svg>`))
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "max-age=86400")
+	w.Write(data)
+}
+
 // ============================================================================
 // Homepage HTML Templates
 // ============================================================================
@@ -3675,9 +3698,16 @@ const homepageHTML = `<!DOCTYPE html>
             text-decoration: none;
             text-shadow: 0 0 10px var(--green-glow);
             letter-spacing: 2px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
         }
-        .logo::before { content: "["; color: var(--green-dim); }
-        .logo::after { content: "]"; color: var(--green-dim); }
+        .logo img {
+            height: 40px;
+            width: auto;
+        }
+        .logo-text::before { content: "["; color: var(--green-dim); }
+        .logo-text::after { content: "]"; color: var(--green-dim); }
         nav { display: flex; gap: 20px; }
         nav a {
             color: var(--green-dim);
@@ -3810,7 +3840,7 @@ const homepageHTML = `<!DOCTYPE html>
             </div>
             <div class="terminal-body">
                 <header>
-                    <a href="/" class="logo">KAYAKNET</a>
+                    <a href="/" class="logo"><img src="/assets/logo.png" alt="KayakNet"><span class="logo-text">KAYAKNET</span></a>
                     <nav>
                         <a href="/marketplace">/market</a>
                         <a href="/chat">/chat</a>
@@ -4023,7 +4053,7 @@ const marketplaceHTML = `<!DOCTYPE html>
             </div>
             <div class="term-body">
                 <header>
-                    <a href="/" class="logo">KAYAKNET</a>
+                    <a href="/" class="logo"><img src="/assets/logo.png" alt="KayakNet"><span class="logo-text">KAYAKNET</span></a>
                     <nav>
                         <a href="/marketplace" class="active">/market</a>
                         <a href="#" onclick="showTab('messages')">/messages<span id="msg-count"></span></a>
@@ -4802,7 +4832,7 @@ const chatPageHTML = `<!DOCTYPE html>
             </div>
             <div class="term-body">
                 <header>
-                    <a href="/" class="logo">KAYAKNET</a>
+                    <a href="/" class="logo"><img src="/assets/logo.png" alt="KayakNet"><span class="logo-text">KAYAKNET</span></a>
                     <nav>
                         <a href="/marketplace">/market</a>
                         <a href="/chat" class="active">/chat</a>
@@ -5426,7 +5456,7 @@ const domainsPageHTML = `<!DOCTYPE html>
             <div class="term-header">KAYAKNET DOMAIN REGISTRY // .KYK NAMING SYSTEM</div>
             <div class="term-body">
                 <header>
-                    <a href="/" class="logo">KAYAKNET</a>
+                    <a href="/" class="logo"><img src="/assets/logo.png" alt="KayakNet"><span class="logo-text">KAYAKNET</span></a>
                     <nav>
                         <a href="/marketplace">/market</a>
                         <a href="/chat">/chat</a>
@@ -5747,7 +5777,7 @@ const networkPageHTML = `<!DOCTYPE html>
             <div class="term-header">KAYAKNET NETWORK STATUS // REAL-TIME</div>
             <div class="term-body">
                 <header>
-                    <a href="/" class="logo">KAYAKNET</a>
+                    <a href="/" class="logo"><img src="/assets/logo.png" alt="KayakNet"><span class="logo-text">KAYAKNET</span></a>
                     <nav>
                         <a href="/marketplace">/market</a>
                         <a href="/chat">/chat</a>
