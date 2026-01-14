@@ -7,6 +7,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import okhttp3.*
+import okhttp3.FormBody
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
@@ -164,21 +165,27 @@ class KayakNetClient(private val context: Context) {
     
     fun sendChatMessage(room: String, message: String) {
         scope.launch {
-            val chatMsg = ChatMessage(
-                id = generateMessageId(),
-                room = room,
-                sender = nodeId,
-                nick = getLocalNick(),
-                content = message,
-                timestamp = System.currentTimeMillis()
-            )
-            
-            val payload = gson.toJson(chatMsg)
-            val msg = P2PMessage("chat", nodeId, payload)
-            sendToBootstrap(gson.toJson(msg))
-            
-            // Add to local list
-            _chatMessages.value = _chatMessages.value + chatMsg
+            try {
+                // Send via HTTP POST to bootstrap API
+                val formBody = FormBody.Builder()
+                    .add("room", room)
+                    .add("message", message)
+                    .build()
+                
+                val request = Request.Builder()
+                    .url("http://$bootstrapHost:8080/api/chat")
+                    .post(formBody)
+                    .build()
+                
+                httpClient.newCall(request).execute().use { response ->
+                    if (response.isSuccessful) {
+                        // Refresh messages to get the broadcasted message
+                        fetchChatHistory(room)
+                    }
+                }
+            } catch (e: Exception) {
+                // Handle error silently
+            }
         }
     }
     
@@ -236,17 +243,20 @@ class KayakNetClient(private val context: Context) {
         }
     }
     
-    private suspend fun fetchChatHistory() {
+    private suspend fun fetchChatHistory(room: String = "general") {
         try {
             val request = Request.Builder()
-                .url("http://$bootstrapHost:8080/api/chat?room=general")
+                .url("http://$bootstrapHost:8080/api/chat?room=$room")
                 .build()
             
             httpClient.newCall(request).execute().use { response ->
                 if (response.isSuccessful) {
                     val body = response.body?.string() ?: "[]"
                     val type = object : TypeToken<List<ChatMessage>>() {}.type
-                    _chatMessages.value = gson.fromJson(body, type) ?: emptyList()
+                    val newMessages: List<ChatMessage> = gson.fromJson(body, type) ?: emptyList()
+                    // Merge with existing messages from other rooms
+                    val existingOtherRooms = _chatMessages.value.filter { it.room != room }
+                    _chatMessages.value = existingOtherRooms + newMessages
                 }
             }
         } catch (e: Exception) {
