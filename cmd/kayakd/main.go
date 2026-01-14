@@ -56,6 +56,7 @@ var (
 	proxySOCKS  = flag.Int("proxy-socks", 8119, "SOCKS5 proxy port")
 	noUpdate    = flag.Bool("no-update", false, "Disable auto-updates")
 	checkUpdate = flag.Bool("check-update", false, "Check for updates and exit")
+	publicAPI   = flag.Bool("public-api", false, "Expose HTTP API on all interfaces (for bootstrap nodes)")
 )
 
 // Node represents a KayakNet P2P node
@@ -142,18 +143,20 @@ type P2PMessage struct {
 
 // Homepage serves the main KayakNet portal at home.kyk
 type Homepage struct {
-	mu      sync.RWMutex
-	port    int
-	node    *Node
-	server  *http.Server
-	running bool
+	mu        sync.RWMutex
+	port      int
+	node      *Node
+	server    *http.Server
+	running   bool
+	publicAPI bool // If true, listen on 0.0.0.0 instead of 127.0.0.1
 }
 
 // NewHomepage creates a new homepage server
-func NewHomepage(node *Node) *Homepage {
+func NewHomepage(node *Node, publicAPI bool) *Homepage {
 	return &Homepage{
-		port: 8080,
-		node: node,
+		port:      8080,
+		node:      node,
+		publicAPI: publicAPI,
 	}
 }
 
@@ -216,8 +219,12 @@ func (h *Homepage) Start(port int) error {
 	mux.HandleFunc("/network", h.handleNetworkPage)
 	mux.HandleFunc("/assets/logo.png", h.handleLogo)
 
+	bindAddr := "127.0.0.1"
+	if h.publicAPI {
+		bindAddr = "0.0.0.0"
+	}
 	h.server = &http.Server{
-		Addr:    fmt.Sprintf("127.0.0.1:%d", port),
+		Addr:    fmt.Sprintf("%s:%d", bindAddr, port),
 		Handler: mux,
 	}
 
@@ -313,13 +320,18 @@ func main() {
 	fmt.Println("║  [+] Padding, mixing, dummy traffic enabled                ║")
 	fmt.Println("║  [+] .kyk domains - KayakNet naming system                 ║")
 
-	// Start browser proxy if enabled
-	if *proxyEnable {
-		// Start homepage server first (at home.kyk)
-		homepagePort := 8080
+	// Start homepage server (for proxy or public API)
+	homepagePort := 8080
+	if *proxyEnable || *publicAPI {
 		if err := node.homepage.Start(homepagePort); err != nil {
 			log.Printf("[WARN] Failed to start homepage: %v", err)
+		} else if *publicAPI {
+			fmt.Printf("║  [+] Public API: http://0.0.0.0:%d                     ║\n", homepagePort)
 		}
+	}
+
+	// Start browser proxy if enabled
+	if *proxyEnable {
 		// Tell proxy where homepage is
 		node.browserProxy.SetHomepagePort(homepagePort)
 
@@ -516,7 +528,7 @@ func NewNode(cfg *config.Config, name string) (*Node, error) {
 	n.browserProxy = proxy.NewProxy(resolver, sender)
 
 	// Create homepage (served at home.kyk and kayaknet.kyk)
-	n.homepage = NewHomepage(n)
+	n.homepage = NewHomepage(n, *publicAPI)
 
 	// Create cryptocurrency wallet and escrow manager
 	// Configure wallet RPC endpoints in config.json for production

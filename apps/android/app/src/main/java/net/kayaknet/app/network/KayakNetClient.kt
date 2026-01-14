@@ -95,28 +95,20 @@ class KayakNetClient(private val context: Context) {
             _connectionState.value = ConnectionState.CONNECTING
             
             try {
-                socket = DatagramSocket()
-                socket?.soTimeout = 5000
+                // Test connection via HTTP API
+                val request = Request.Builder()
+                    .url("http://$bootstrapHost:8080/api/stats")
+                    .build()
                 
-                // Send initial ping to bootstrap
-                val pingData = """{"type":"ping","from":"$nodeId"}""".toByteArray()
-                val address = InetAddress.getByName(bootstrapHost)
-                val packet = DatagramPacket(pingData, pingData.size, address, bootstrapPort)
-                socket?.send(packet)
-                
-                // Wait for response
-                val buffer = ByteArray(65535)
-                val responsePacket = DatagramPacket(buffer, buffer.size)
-                socket?.receive(responsePacket)
-                
-                _connectionState.value = ConnectionState.CONNECTED
-                
-                // Start message listener
-                startMessageListener()
-                
-                // Load initial data
-                refreshData()
-                
+                httpClient.newCall(request).execute().use { response ->
+                    if (response.isSuccessful) {
+                        _connectionState.value = ConnectionState.CONNECTED
+                        // Load initial data
+                        refreshData()
+                    } else {
+                        _connectionState.value = ConnectionState.ERROR
+                    }
+                }
             } catch (e: Exception) {
                 _connectionState.value = ConnectionState.ERROR
             }
