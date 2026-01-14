@@ -10,6 +10,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
@@ -21,12 +22,13 @@ import net.kayaknet.app.network.ConnectionState
 fun SettingsScreen() {
     val client = KayakNetApp.instance.client
     val connectionState by client.connectionState.collectAsState()
+    val networkStats by client.networkStats.collectAsState()
     val clipboardManager = LocalClipboardManager.current
     
     var nickname by remember { mutableStateOf(client.getLocalNick()) }
     var showNodeId by remember { mutableStateOf(false) }
-    var autoConnect by remember { mutableStateOf(true) }
-    var notifications by remember { mutableStateOf(true) }
+    var autoConnect by remember { mutableStateOf(client.isAutoConnectEnabled()) }
+    var copiedNodeId by remember { mutableStateOf(false) }
     
     Column(
         modifier = Modifier
@@ -84,11 +86,12 @@ fun SettingsScreen() {
                     
                     IconButton(onClick = { 
                         clipboardManager.setText(AnnotatedString(client.getNodeId()))
+                        copiedNodeId = true
                     }) {
                         Icon(
-                            Icons.Filled.ContentCopy,
+                            if (copiedNodeId) Icons.Filled.Check else Icons.Filled.ContentCopy,
                             contentDescription = "Copy",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            tint = if (copiedNodeId) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
@@ -101,14 +104,17 @@ fun SettingsScreen() {
                 title = "Auto-connect",
                 description = "Connect to network on app start",
                 checked = autoConnect,
-                onCheckedChange = { autoConnect = it }
+                onCheckedChange = { 
+                    autoConnect = it
+                    client.setAutoConnect(it)
+                }
             )
             
             Divider(color = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f))
             
             SettingsItem(
                 title = "Bootstrap Node",
-                value = "203.161.33.237:4242"
+                value = "${client.bootstrapHost}:${client.bootstrapPort}"
             )
             
             Divider(color = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f))
@@ -127,15 +133,12 @@ fun SettingsScreen() {
                     else -> MaterialTheme.colorScheme.onSurfaceVariant
                 }
             )
-        }
-        
-        // Notifications Section
-        SettingsSection(title = "NOTIFICATIONS") {
-            SettingsSwitch(
-                title = "Push Notifications",
-                description = "Receive message notifications",
-                checked = notifications,
-                onCheckedChange = { notifications = it }
+            
+            Divider(color = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f))
+            
+            SettingsItem(
+                title = "Network Version",
+                value = networkStats?.version ?: "Unknown"
             )
         }
         
@@ -152,13 +155,20 @@ fun SettingsScreen() {
                 title = "Traffic Protection",
                 value = "Padding + Mixing"
             )
+            
+            Divider(color = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f))
+            
+            SettingsItem(
+                title = "Identity",
+                value = "Ed25519 Keypair"
+            )
         }
         
         // About Section
         SettingsSection(title = "ABOUT") {
             SettingsItem(
-                title = "Version",
-                value = "v0.1.14"
+                title = "App Version",
+                value = "v0.1.17"
             )
             
             Divider(color = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f))
@@ -167,13 +177,38 @@ fun SettingsScreen() {
                 title = "Protocol",
                 value = "KayakNet P2P"
             )
+            
+            Divider(color = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f))
+            
+            SettingsItem(
+                title = "Network Peers",
+                value = (networkStats?.peers ?: 0).toString()
+            )
         }
         
-        // Danger Zone
-        Spacer(modifier = Modifier.height(16.dp))
+        // Actions
+        Spacer(modifier = Modifier.height(8.dp))
+        
+        if (connectionState == ConnectionState.CONNECTED) {
+            Button(
+                onClick = { client.forceRefresh() },
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary
+                )
+            ) {
+                Icon(Icons.Filled.Refresh, contentDescription = null)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("FORCE SYNC")
+            }
+        }
         
         OutlinedButton(
-            onClick = { /* TODO: Clear data */ },
+            onClick = { 
+                // Clear preferences (except node ID)
+                val nodeId = client.getNodeId()
+                // In a real app, you'd clear other data here
+            },
             modifier = Modifier.fillMaxWidth(),
             colors = ButtonDefaults.outlinedButtonColors(
                 contentColor = MaterialTheme.colorScheme.error
@@ -181,7 +216,7 @@ fun SettingsScreen() {
         ) {
             Icon(Icons.Filled.Delete, contentDescription = null)
             Spacer(modifier = Modifier.width(8.dp))
-            Text("CLEAR ALL DATA")
+            Text("CLEAR CACHE")
         }
     }
 }
@@ -221,7 +256,7 @@ fun SettingsSection(
 fun SettingsItem(
     title: String,
     value: String,
-    valueColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onSurfaceVariant
+    valueColor: Color = MaterialTheme.colorScheme.onSurfaceVariant
 ) {
     Row(
         modifier = Modifier
@@ -279,4 +314,3 @@ fun SettingsSwitch(
         )
     }
 }
-

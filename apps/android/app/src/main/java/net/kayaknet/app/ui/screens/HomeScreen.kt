@@ -4,6 +4,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -17,7 +19,7 @@ import net.kayaknet.app.network.ConnectionState
 fun HomeScreen() {
     val client = KayakNetApp.instance.client
     val connectionState by client.connectionState.collectAsState()
-    val peers by client.peers.collectAsState()
+    val networkStats by client.networkStats.collectAsState()
     val listings by client.listings.collectAsState()
     val domains by client.domains.collectAsState()
     
@@ -50,6 +52,54 @@ fun HomeScreen() {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                if (networkStats?.version?.isNotEmpty() == true) {
+                    Text(
+                        text = "Network: ${networkStats?.version}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+        
+        // Connection Status
+        TerminalBox {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        text = "> CONNECTION",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = when (connectionState) {
+                            ConnectionState.CONNECTED -> "[ONLINE] Connected to ${client.bootstrapHost}"
+                            ConnectionState.CONNECTING -> "[...] Connecting..."
+                            ConnectionState.DISCONNECTED -> "[OFFLINE] Not connected"
+                            ConnectionState.ERROR -> "[ERROR] Connection failed"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = when (connectionState) {
+                            ConnectionState.CONNECTED -> MaterialTheme.colorScheme.primary
+                            ConnectionState.ERROR -> MaterialTheme.colorScheme.error
+                            else -> MaterialTheme.colorScheme.onSurfaceVariant
+                        }
+                    )
+                }
+                
+                if (connectionState == ConnectionState.CONNECTED) {
+                    IconButton(onClick = { client.forceRefresh() }) {
+                        Icon(
+                            Icons.Filled.Refresh,
+                            contentDescription = "Refresh",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
             }
         }
         
@@ -65,7 +115,7 @@ fun HomeScreen() {
             )
             StatCard(
                 title = "PEERS",
-                value = peers.size.toString(),
+                value = (networkStats?.peers ?: 0).toString(),
                 modifier = Modifier.weight(1f)
             )
         }
@@ -104,26 +154,44 @@ fun HomeScreen() {
         }
         
         // Connection Button
-        if (connectionState != ConnectionState.CONNECTED) {
-            Button(
-                onClick = { client.connect() },
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = MaterialTheme.colorScheme.onPrimary
-                )
-            ) {
-                Text("CONNECT TO NETWORK")
+        when (connectionState) {
+            ConnectionState.DISCONNECTED, ConnectionState.ERROR -> {
+                Button(
+                    onClick = { client.connect() },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary
+                    )
+                ) {
+                    Text("CONNECT TO NETWORK")
+                }
             }
-        } else {
-            OutlinedButton(
-                onClick = { client.disconnect() },
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.outlinedButtonColors(
-                    contentColor = MaterialTheme.colorScheme.error
-                )
-            ) {
-                Text("DISCONNECT")
+            ConnectionState.CONNECTING -> {
+                Button(
+                    onClick = { },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = false
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("CONNECTING...")
+                }
+            }
+            ConnectionState.CONNECTED -> {
+                OutlinedButton(
+                    onClick = { client.disconnect() },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error
+                    )
+                ) {
+                    Text("DISCONNECT")
+                }
             }
         }
     }
@@ -180,4 +248,3 @@ fun FeatureItem(text: String) {
         color = MaterialTheme.colorScheme.onSurfaceVariant
     )
 }
-

@@ -1,20 +1,17 @@
 package net.kayaknet.app.network
 
 import android.content.Context
+import android.content.SharedPreferences
+import android.util.Log
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import okhttp3.*
-import okhttp3.FormBody
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
-import java.io.IOException
-import java.net.DatagramPacket
-import java.net.DatagramSocket
-import java.net.InetAddress
 import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.MessageDigest
@@ -23,18 +20,29 @@ import java.util.concurrent.TimeUnit
 
 class KayakNetClient(private val context: Context) {
     
+    companion object {
+        private const val TAG = "KayakNetClient"
+        private const val PREFS_NAME = "kayaknet_prefs"
+        private const val KEY_NODE_ID = "node_id"
+        private const val KEY_NICK = "nick"
+        private const val KEY_BOOTSTRAP = "bootstrap_host"
+        private const val KEY_AUTO_CONNECT = "auto_connect"
+        private const val SYNC_INTERVAL = 5000L // 5 seconds
+    }
+    
     private val gson = Gson()
+    private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .writeTimeout(15, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .build()
     
-    private var socket: DatagramSocket? = null
-    private var keyPair: KeyPair? = null
     private var nodeId: String = ""
-    
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var syncJob: Job? = null
     
     // Connection state
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
@@ -43,8 +51,8 @@ class KayakNetClient(private val context: Context) {
     private val _peers = MutableStateFlow<List<Peer>>(emptyList())
     val peers: StateFlow<List<Peer>> = _peers
     
-    private val _chatMessages = MutableStateFlow<List<ChatMessage>>(emptyList())
-    val chatMessages: StateFlow<List<ChatMessage>> = _chatMessages
+    private val _chatMessages = MutableStateFlow<Map<String, List<ChatMessage>>>(emptyMap())
+    val chatMessages: StateFlow<Map<String, List<ChatMessage>>> = _chatMessages
     
     private val _listings = MutableStateFlow<List<Listing>>(emptyList())
     val listings: StateFlow<List<Listing>> = _listings
@@ -52,43 +60,42 @@ class KayakNetClient(private val context: Context) {
     private val _domains = MutableStateFlow<List<Domain>>(emptyList())
     val domains: StateFlow<List<Domain>> = _domains
     
-    private var bootstrapHost = "203.161.33.237"
-    private var bootstrapPort = 4242
+    private val _myDomains = MutableStateFlow<List<Domain>>(emptyList())
+    val myDomains: StateFlow<List<Domain>> = _myDomains
+    
+    private val _networkStats = MutableStateFlow<NetworkStats?>(null)
+    val networkStats: StateFlow<NetworkStats?> = _networkStats
+    
+    private val _chatRooms = MutableStateFlow<List<ChatRoom>>(emptyList())
+    val chatRooms: StateFlow<List<ChatRoom>> = _chatRooms
+    
+    var bootstrapHost = "203.161.33.237"
+        private set
+    var bootstrapPort = 8080
+        private set
     
     init {
         loadOrCreateIdentity()
+        bootstrapHost = prefs.getString(KEY_BOOTSTRAP, "203.161.33.237") ?: "203.161.33.237"
     }
     
     private fun loadOrCreateIdentity() {
-        val identityFile = File(context.filesDir, "identity.json")
-        if (identityFile.exists()) {
-            try {
-                val data = identityFile.readText()
-                val identity = gson.fromJson(data, Identity::class.java)
-                nodeId = identity.nodeId
-                // In real implementation, load the keypair from stored data
-            } catch (e: Exception) {
-                createNewIdentity(identityFile)
-            }
+        val savedId = prefs.getString(KEY_NODE_ID, null)
+        if (savedId != null) {
+            nodeId = savedId
         } else {
-            createNewIdentity(identityFile)
+            // Generate new identity
+            val keyGen = KeyPairGenerator.getInstance("EC")
+            keyGen.initialize(256, SecureRandom())
+            val keyPair = keyGen.generateKeyPair()
+            
+            val digest = MessageDigest.getInstance("SHA-256")
+            val hash = digest.digest(keyPair.public.encoded)
+            nodeId = hash.joinToString("") { "%02x".format(it) }
+            
+            prefs.edit().putString(KEY_NODE_ID, nodeId).apply()
         }
-    }
-    
-    private fun createNewIdentity(file: File) {
-        // Generate Ed25519-like identity (simplified for demo)
-        val keyGen = KeyPairGenerator.getInstance("EC")
-        keyGen.initialize(256, SecureRandom())
-        keyPair = keyGen.generateKeyPair()
-        
-        // Generate node ID from public key hash
-        val digest = MessageDigest.getInstance("SHA-256")
-        val hash = digest.digest(keyPair!!.public.encoded)
-        nodeId = hash.joinToString("") { "%02x".format(it) }
-        
-        // Save identity
-        val identity = Identity(nodeId, System.currentTimeMillis())
-        file.writeText(gson.toJson(identity))
+        Log.d(TAG, "Node ID: ${nodeId.take(16)}...")
     }
     
     fun connect() {
@@ -96,121 +103,160 @@ class KayakNetClient(private val context: Context) {
             _connectionState.value = ConnectionState.CONNECTING
             
             try {
-                // Test connection via HTTP API
                 val request = Request.Builder()
-                    .url("http://$bootstrapHost:8080/api/stats")
+                    .url("http://$bootstrapHost:$bootstrapPort/api/stats")
                     .build()
                 
                 httpClient.newCall(request).execute().use { response ->
                     if (response.isSuccessful) {
+                        val body = response.body?.string()
+                        if (body != null) {
+                            val stats = gson.fromJson(body, NetworkStats::class.java)
+                            _networkStats.value = stats
+                        }
                         _connectionState.value = ConnectionState.CONNECTED
-                        // Load initial data
-                        refreshData()
+                        startSyncLoop()
+                        Log.d(TAG, "Connected to KayakNet")
                     } else {
                         _connectionState.value = ConnectionState.ERROR
+                        Log.e(TAG, "Connection failed: ${response.code}")
                     }
                 }
             } catch (e: Exception) {
                 _connectionState.value = ConnectionState.ERROR
+                Log.e(TAG, "Connection error: ${e.message}")
             }
         }
     }
     
     fun disconnect() {
-        scope.launch {
-            socket?.close()
-            socket = null
-            _connectionState.value = ConnectionState.DISCONNECTED
-        }
+        syncJob?.cancel()
+        syncJob = null
+        _connectionState.value = ConnectionState.DISCONNECTED
     }
     
-    private fun startMessageListener() {
-        scope.launch {
-            while (isActive && socket != null && !socket!!.isClosed) {
+    private fun startSyncLoop() {
+        syncJob?.cancel()
+        syncJob = scope.launch {
+            while (isActive) {
                 try {
-                    val buffer = ByteArray(65535)
-                    val packet = DatagramPacket(buffer, buffer.size)
-                    socket?.receive(packet)
-                    
-                    val data = String(packet.data, 0, packet.length)
-                    handleMessage(data)
-                } catch (e: IOException) {
-                    if (socket?.isClosed == true) break
+                    syncAll()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Sync error: ${e.message}")
                 }
+                delay(SYNC_INTERVAL)
             }
         }
     }
     
-    private fun handleMessage(data: String) {
+    private suspend fun syncAll() {
+        coroutineScope {
+            launch { fetchStats() }
+            launch { fetchChatRooms() }
+            launch { fetchListings() }
+            launch { fetchDomains() }
+            // Fetch messages for all known rooms
+            _chatRooms.value.forEach { room ->
+                launch { fetchChatHistory(room.name) }
+            }
+        }
+    }
+    
+    private suspend fun fetchStats() {
         try {
-            val msg = gson.fromJson(data, P2PMessage::class.java)
-            when (msg.type) {
-                "chat" -> {
-                    val chatMsg = gson.fromJson(msg.payload, ChatMessage::class.java)
-                    _chatMessages.value = _chatMessages.value + chatMsg
-                }
-                "listing" -> {
-                    val listing = gson.fromJson(msg.payload, Listing::class.java)
-                    _listings.value = _listings.value + listing
-                }
-                "domain" -> {
-                    val domain = gson.fromJson(msg.payload, Domain::class.java)
-                    _domains.value = _domains.value + domain
-                }
-            }
-        } catch (e: Exception) {
-            // Ignore malformed messages
-        }
-    }
-    
-    fun sendChatMessage(room: String, message: String) {
-        scope.launch {
-            try {
-                // Send via HTTP POST to bootstrap API
-                val formBody = FormBody.Builder()
-                    .add("room", room)
-                    .add("message", message)
-                    .build()
-                
-                val request = Request.Builder()
-                    .url("http://$bootstrapHost:8080/api/chat")
-                    .post(formBody)
-                    .build()
-                
-                httpClient.newCall(request).execute().use { response ->
-                    if (response.isSuccessful) {
-                        // Refresh messages to get the broadcasted message
-                        fetchChatHistory(room)
+            val request = Request.Builder()
+                .url("http://$bootstrapHost:$bootstrapPort/api/stats")
+                .build()
+            
+            httpClient.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string()
+                    if (body != null) {
+                        _networkStats.value = gson.fromJson(body, NetworkStats::class.java)
                     }
                 }
-            } catch (e: Exception) {
-                // Handle error silently
             }
-        }
-    }
-    
-    private fun sendToBootstrap(data: String) {
-        try {
-            val bytes = data.toByteArray()
-            val address = InetAddress.getByName(bootstrapHost)
-            val packet = DatagramPacket(bytes, bytes.size, address, bootstrapPort)
-            socket?.send(packet)
         } catch (e: Exception) {
-            // Handle send error
+            Log.e(TAG, "fetchStats error: ${e.message}")
         }
     }
     
-    suspend fun refreshData() {
-        // Fetch data from bootstrap's HTTP API (if running proxy)
-        fetchListings()
-        fetchDomains()
-        fetchChatHistory()
+    private suspend fun fetchChatRooms() {
+        try {
+            val request = Request.Builder()
+                .url("http://$bootstrapHost:$bootstrapPort/api/chat/rooms")
+                .build()
+            
+            httpClient.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string() ?: "[]"
+                    val type = object : TypeToken<List<ChatRoom>>() {}.type
+                    _chatRooms.value = gson.fromJson(body, type) ?: emptyList()
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "fetchChatRooms error: ${e.message}")
+        }
+    }
+    
+    suspend fun fetchChatHistory(room: String) {
+        try {
+            val request = Request.Builder()
+                .url("http://$bootstrapHost:$bootstrapPort/api/chat?room=$room")
+                .build()
+            
+            httpClient.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string() ?: "[]"
+                    val type = object : TypeToken<List<ChatMessage>>() {}.type
+                    val messages: List<ChatMessage> = gson.fromJson(body, type) ?: emptyList()
+                    
+                    val currentMap = _chatMessages.value.toMutableMap()
+                    currentMap[room] = messages
+                    _chatMessages.value = currentMap
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "fetchChatHistory error: ${e.message}")
+        }
+    }
+    
+    fun getMessagesForRoom(room: String): List<ChatMessage> {
+        return _chatMessages.value[room] ?: emptyList()
+    }
+    
+    suspend fun sendChatMessage(room: String, message: String): Boolean {
+        return try {
+            val formBody = FormBody.Builder()
+                .add("room", room)
+                .add("message", message)
+                .build()
+            
+            val request = Request.Builder()
+                .url("http://$bootstrapHost:$bootstrapPort/api/chat")
+                .post(formBody)
+                .build()
+            
+            httpClient.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    // Immediately refresh to get the new message
+                    fetchChatHistory(room)
+                    true
+                } else {
+                    Log.e(TAG, "sendChatMessage failed: ${response.code}")
+                    false
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "sendChatMessage error: ${e.message}")
+            false
+        }
     }
     
     private suspend fun fetchListings() {
         try {
             val request = Request.Builder()
-                .url("http://$bootstrapHost:8080/api/listings")
+                .url("http://$bootstrapHost:$bootstrapPort/api/listings")
                 .build()
             
             httpClient.newCall(request).execute().use { response ->
@@ -221,14 +267,14 @@ class KayakNetClient(private val context: Context) {
                 }
             }
         } catch (e: Exception) {
-            // API might not be available
+            Log.e(TAG, "fetchListings error: ${e.message}")
         }
     }
     
     private suspend fun fetchDomains() {
         try {
             val request = Request.Builder()
-                .url("http://$bootstrapHost:8080/api/domains")
+                .url("http://$bootstrapHost:$bootstrapPort/api/domains")
                 .build()
             
             httpClient.newCall(request).execute().use { response ->
@@ -238,59 +284,51 @@ class KayakNetClient(private val context: Context) {
                     _domains.value = gson.fromJson(body, type) ?: emptyList()
                 }
             }
-        } catch (e: Exception) {
-            // API might not be available
-        }
-    }
-    
-    private suspend fun fetchChatHistory(room: String = "general") {
-        try {
-            val request = Request.Builder()
-                .url("http://$bootstrapHost:8080/api/chat?room=$room")
+            
+            // Also fetch my domains
+            val myRequest = Request.Builder()
+                .url("http://$bootstrapHost:$bootstrapPort/api/domains/my?owner=$nodeId")
                 .build()
             
-            httpClient.newCall(request).execute().use { response ->
+            httpClient.newCall(myRequest).execute().use { response ->
                 if (response.isSuccessful) {
                     val body = response.body?.string() ?: "[]"
-                    val type = object : TypeToken<List<ChatMessage>>() {}.type
-                    val newMessages: List<ChatMessage> = gson.fromJson(body, type) ?: emptyList()
-                    // Merge with existing messages from other rooms
-                    val existingOtherRooms = _chatMessages.value.filter { it.room != room }
-                    _chatMessages.value = existingOtherRooms + newMessages
+                    val type = object : TypeToken<List<Domain>>() {}.type
+                    _myDomains.value = gson.fromJson(body, type) ?: emptyList()
                 }
             }
         } catch (e: Exception) {
-            // API might not be available
+            Log.e(TAG, "fetchDomains error: ${e.message}")
         }
     }
     
     suspend fun registerDomain(name: String, description: String): Result<Domain> {
         return try {
-            val json = gson.toJson(mapOf(
-                "name" to name,
-                "description" to description
-            ))
+            val formBody = FormBody.Builder()
+                .add("name", name)
+                .add("description", description)
+                .add("owner", nodeId)
+                .build()
             
             val request = Request.Builder()
-                .url("http://$bootstrapHost:8080/api/domains/register")
-                .post(json.toRequestBody("application/json".toMediaType()))
+                .url("http://$bootstrapHost:$bootstrapPort/api/domains/register")
+                .post(formBody)
                 .build()
             
             httpClient.newCall(request).execute().use { response ->
                 val body = response.body?.string() ?: "{}"
-                val result = gson.fromJson(body, Map::class.java)
                 
-                if (result["success"] == true) {
+                if (response.isSuccessful) {
+                    fetchDomains()
                     val domain = Domain(
                         name = name,
                         fullName = "$name.kyk",
                         description = description,
                         owner = nodeId
                     )
-                    _domains.value = _domains.value + domain
                     Result.success(domain)
                 } else {
-                    Result.failure(Exception(result["error"]?.toString() ?: "Unknown error"))
+                    Result.failure(Exception("Registration failed: $body"))
                 }
             }
         } catch (e: Exception) {
@@ -298,22 +336,98 @@ class KayakNetClient(private val context: Context) {
         }
     }
     
+    suspend fun createListing(
+        title: String,
+        description: String,
+        price: Double,
+        currency: String,
+        category: String
+    ): Result<Listing> {
+        return try {
+            val formBody = FormBody.Builder()
+                .add("title", title)
+                .add("description", description)
+                .add("price", price.toString())
+                .add("currency", currency)
+                .add("category", category)
+                .add("seller", nodeId)
+                .add("seller_name", getLocalNick())
+                .build()
+            
+            val request = Request.Builder()
+                .url("http://$bootstrapHost:$bootstrapPort/api/create-listing")
+                .post(formBody)
+                .build()
+            
+            httpClient.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    fetchListings()
+                    val listing = Listing(
+                        id = "",
+                        title = title,
+                        description = description,
+                        price = price,
+                        currency = currency,
+                        category = category,
+                        seller = nodeId,
+                        sellerName = getLocalNick()
+                    )
+                    Result.success(listing)
+                } else {
+                    Result.failure(Exception("Failed to create listing"))
+                }
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+    
+    suspend fun resolveDomain(name: String): Domain? {
+        return try {
+            val request = Request.Builder()
+                .url("http://$bootstrapHost:$bootstrapPort/api/domains/resolve?name=$name")
+                .build()
+            
+            httpClient.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string()
+                    if (body != null && body != "null") {
+                        gson.fromJson(body, Domain::class.java)
+                    } else null
+                } else null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+    
     fun getNodeId(): String = nodeId
     
     fun getLocalNick(): String {
-        val prefs = context.getSharedPreferences("kayaknet", Context.MODE_PRIVATE)
-        return prefs.getString("nick", "anon-${nodeId.take(8)}") ?: "anon"
+        return prefs.getString(KEY_NICK, "anon-${nodeId.take(8)}") ?: "anon-${nodeId.take(8)}"
     }
     
     fun setLocalNick(nick: String) {
-        val prefs = context.getSharedPreferences("kayaknet", Context.MODE_PRIVATE)
-        prefs.edit().putString("nick", nick).apply()
+        prefs.edit().putString(KEY_NICK, nick).apply()
     }
     
-    private fun generateMessageId(): String {
-        val bytes = ByteArray(16)
-        SecureRandom().nextBytes(bytes)
-        return bytes.joinToString("") { "%02x".format(it) }
+    fun setBootstrapHost(host: String) {
+        bootstrapHost = host
+        prefs.edit().putString(KEY_BOOTSTRAP, host).apply()
+    }
+    
+    fun isAutoConnectEnabled(): Boolean {
+        return prefs.getBoolean(KEY_AUTO_CONNECT, true)
+    }
+    
+    fun setAutoConnect(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_AUTO_CONNECT, enabled).apply()
+    }
+    
+    fun forceRefresh() {
+        scope.launch {
+            syncAll()
+        }
     }
 }
 
@@ -324,15 +438,12 @@ enum class ConnectionState {
     ERROR
 }
 
-data class Identity(
-    val nodeId: String,
-    val createdAt: Long
-)
-
-data class P2PMessage(
-    val type: String,
-    val from: String,
-    val payload: String
+data class NetworkStats(
+    val peers: Int = 0,
+    val listings: Int = 0,
+    val domains: Int = 0,
+    val messages: Int = 0,
+    val version: String = ""
 )
 
 data class Peer(
@@ -341,14 +452,28 @@ data class Peer(
     val lastSeen: Long
 )
 
+data class ChatRoom(
+    val name: String,
+    val description: String = "",
+    val members: Int = 0
+)
+
 data class ChatMessage(
-    val id: String,
-    val room: String,
-    val sender: String,
-    val nick: String,
-    val content: String,
-    val timestamp: Long,
-    val mediaUrl: String? = null
+    val id: String = "",
+    val type: String = "message",
+    val room: String = "",
+    val sender_id: String = "",
+    val nick: String = "",
+    val content: String = "",
+    val timestamp: String = "",
+    val reactions: Map<String, List<String>>? = null,
+    val media: MediaAttachment? = null
+)
+
+data class MediaAttachment(
+    val type: String = "",
+    val name: String = "",
+    val data: String = ""
 )
 
 data class Listing(
@@ -372,4 +497,3 @@ data class Domain(
     val createdAt: String? = null,
     val expiresAt: String? = null
 )
-
