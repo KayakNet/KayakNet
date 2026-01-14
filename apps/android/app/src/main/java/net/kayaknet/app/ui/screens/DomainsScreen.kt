@@ -267,6 +267,7 @@ fun DomainsScreen() {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DomainCard(
     domain: Domain,
