@@ -8,6 +8,9 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -137,6 +140,7 @@ type ChatManager struct {
 	localNick     string
 	localUser     *User
 	signFunc      func([]byte) []byte
+	dataDir       string                        // Directory for persistent storage
 
 	// Callbacks
 	onMessage     func(*Message)
@@ -179,6 +183,100 @@ func NewChatManager(localID string, pubKey ed25519.PublicKey, nick string, signF
 	cm.CreateRoom("privacy", "Privacy and security discussion", false)
 
 	return cm
+}
+
+// SetDataDir sets the data directory for persistence
+func (cm *ChatManager) SetDataDir(dataDir string) error {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	
+	cm.dataDir = filepath.Join(dataDir, "chat")
+	if err := os.MkdirAll(cm.dataDir, 0700); err != nil {
+		return err
+	}
+	
+	// Load existing data
+	cm.loadData()
+	return nil
+}
+
+// ChatData holds all chat data for persistence
+type ChatData struct {
+	Rooms         map[string]*Room               `json:"rooms"`
+	Users         map[string]*User               `json:"users"`
+	Conversations map[string]*DirectConversation `json:"conversations"`
+	LocalNick     string                         `json:"local_nick"`
+}
+
+// Save persists chat data to disk
+func (cm *ChatManager) Save() error {
+	if cm.dataDir == "" {
+		return nil
+	}
+	
+	cm.mu.RLock()
+	data := ChatData{
+		Rooms:         cm.rooms,
+		Users:         cm.users,
+		Conversations: cm.conversations,
+		LocalNick:     cm.localNick,
+	}
+	cm.mu.RUnlock()
+	
+	path := filepath.Join(cm.dataDir, "chat.json")
+	tmpPath := path + ".tmp"
+	
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return err
+	}
+	
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(data); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	
+	if err := f.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	
+	return os.Rename(tmpPath, path)
+}
+
+// loadData loads chat data from disk
+func (cm *ChatManager) loadData() {
+	if cm.dataDir == "" {
+		return
+	}
+	
+	path := filepath.Join(cm.dataDir, "chat.json")
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	
+	var data ChatData
+	if err := json.NewDecoder(f).Decode(&data); err != nil {
+		return
+	}
+	
+	if data.Rooms != nil {
+		cm.rooms = data.Rooms
+	}
+	if data.Users != nil {
+		cm.users = data.Users
+	}
+	if data.Conversations != nil {
+		cm.conversations = data.Conversations
+	}
+	if data.LocalNick != "" {
+		cm.localNick = data.LocalNick
+	}
 }
 
 // SetNick sets the local nickname
@@ -349,19 +447,30 @@ func (cm *ChatManager) SendMessageWithMedia(roomName, content string, media *Med
 	cm.localUser.LastSeen = time.Now()
 	cm.mu.Unlock()
 
+	// Auto-save after sending
+	go cm.Save()
+
 	return msg, nil
 }
 
 // SendDM sends a direct message to another user
 func (cm *ChatManager) SendDM(receiverID, content string, media *MediaAttachment) (*Message, error) {
-	cm.mu.RLock()
+	cm.mu.Lock()
 	receiver, exists := cm.users[receiverID]
 	nick := cm.localNick
-	cm.mu.RUnlock()
-
+	
+	// If user doesn't exist, create a placeholder entry (they may be on another node)
 	if !exists {
-		return nil, ErrUserNotFound
+		receiver = &User{
+			ID:       receiverID,
+			Nick:     receiverID[:8] + "...",
+			Status:   "online",
+			AllowDMs: true, // Assume allowed until told otherwise
+			JoinedAt: time.Now(),
+		}
+		cm.users[receiverID] = receiver
 	}
+	cm.mu.Unlock()
 
 	if !receiver.AllowDMs {
 		return nil, ErrDMsDisabled
@@ -419,6 +528,9 @@ func (cm *ChatManager) SendDM(receiverID, content string, media *MediaAttachment
 		conv.Messages = conv.Messages[1:]
 	}
 	conv.mu.Unlock()
+
+	// Auto-save after sending DM
+	go cm.Save()
 
 	return msg, nil
 }
@@ -485,6 +597,9 @@ func (cm *ChatManager) ReceiveMessage(msg *Message) error {
 		callback(msg)
 	}
 
+	// Persist to disk
+	go cm.Save()
+
 	return nil
 }
 
@@ -550,6 +665,9 @@ func (cm *ChatManager) receiveDM(msg *Message) error {
 	if callback != nil {
 		callback(msg)
 	}
+
+	// Auto-save after receiving DM
+	go cm.Save()
 
 	return nil
 }
@@ -817,7 +935,7 @@ func (cm *ChatManager) LeaveRoom(roomName string) {
 }
 
 // SetTyping marks user as typing in a room
-func (cm *ChatManager) SetTyping(roomName string, typing bool) {
+func (cm *ChatManager) SetTyping(roomName string, userID string) {
 	cm.mu.RLock()
 	room, exists := cm.rooms[roomName]
 	cm.mu.RUnlock()
@@ -827,12 +945,139 @@ func (cm *ChatManager) SetTyping(roomName string, typing bool) {
 	}
 
 	room.mu.Lock()
-	if typing {
-		room.typingUsers[cm.localID] = time.Now()
-	} else {
-		delete(room.typingUsers, cm.localID)
+	if room.typingUsers == nil {
+		room.typingUsers = make(map[string]time.Time)
 	}
+	room.typingUsers[userID] = time.Now()
 	room.mu.Unlock()
+}
+
+// GetTyping returns list of nicknames of users currently typing
+func (cm *ChatManager) GetTyping(roomName string) []string {
+	cm.mu.RLock()
+	room, exists := cm.rooms[roomName]
+	cm.mu.RUnlock()
+
+	if !exists {
+		return nil
+	}
+
+	room.mu.RLock()
+	defer room.mu.RUnlock()
+
+	cutoff := time.Now().Add(-5 * time.Second)
+	var names []string
+
+	for userID, typingTime := range room.typingUsers {
+		if typingTime.After(cutoff) && userID != cm.localID {
+			cm.mu.RLock()
+			if user, ok := cm.users[userID]; ok {
+				names = append(names, user.Nick)
+			} else {
+				names = append(names, userID[:8])
+			}
+			cm.mu.RUnlock()
+		}
+	}
+	return names
+}
+
+// EditMessage edits a message (only owner can edit)
+func (cm *ChatManager) EditMessage(msgID, content, userID string) error {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	
+	for _, room := range cm.rooms {
+		room.mu.Lock()
+		for _, msg := range room.messages {
+			if msg.ID == msgID {
+				if msg.SenderID != userID {
+					room.mu.Unlock()
+					return errors.New("not message owner")
+				}
+				msg.Content = content
+				msg.Edited = true
+				msg.EditedAt = time.Now().Unix()
+				room.mu.Unlock()
+				return nil
+			}
+		}
+		room.mu.Unlock()
+	}
+	return errors.New("message not found")
+}
+
+// DeleteMessage deletes a message (only owner can delete)
+func (cm *ChatManager) DeleteMessage(msgID, userID string) error {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	
+	for _, room := range cm.rooms {
+		room.mu.Lock()
+		for i, msg := range room.messages {
+			if msg.ID == msgID {
+				if msg.SenderID != userID {
+					room.mu.Unlock()
+					return errors.New("not message owner")
+				}
+				// Mark as deleted rather than removing
+				msg.Content = "[deleted]"
+				msg.Type = MsgTypeSystem
+				room.messages[i] = msg
+				room.mu.Unlock()
+				return nil
+			}
+		}
+		room.mu.Unlock()
+	}
+	return errors.New("message not found")
+}
+
+// PinMessage pins a message in a room
+func (cm *ChatManager) PinMessage(roomName, msgID string) {
+	cm.mu.RLock()
+	room, exists := cm.rooms[roomName]
+	cm.mu.RUnlock()
+
+	if !exists {
+		return
+	}
+
+	room.mu.Lock()
+	defer room.mu.Unlock()
+	
+	// Check if already pinned
+	for _, id := range room.Pinned {
+		if id == msgID {
+			return
+		}
+	}
+	room.Pinned = append(room.Pinned, msgID)
+}
+
+// GetPinnedMessages returns pinned messages for a room
+func (cm *ChatManager) GetPinnedMessages(roomName string) []*Message {
+	cm.mu.RLock()
+	room, exists := cm.rooms[roomName]
+	cm.mu.RUnlock()
+
+	if !exists {
+		return nil
+	}
+
+	room.mu.RLock()
+	defer room.mu.RUnlock()
+	
+	var pinned []*Message
+	for _, pinnedID := range room.Pinned {
+		for _, msg := range room.messages {
+			if msg.ID == pinnedID {
+				pinned = append(pinned, msg)
+				break
+			}
+		}
+	}
+	return pinned
 }
 
 // GetTypingUsers returns users currently typing

@@ -38,7 +38,11 @@ import (
 	"github.com/kayaknet/kayaknet/internal/proxy"
 	"github.com/kayaknet/kayaknet/internal/pubsub"
 	"github.com/kayaknet/kayaknet/internal/security"
+	"github.com/kayaknet/kayaknet/internal/updater"
 )
+
+// Version is set at build time
+var Version = "v0.1.11"
 
 var (
 	configPath  = flag.String("config", "", "Path to configuration file")
@@ -50,6 +54,8 @@ var (
 	proxyEnable = flag.Bool("proxy", false, "Enable browser proxy (HTTP on 8118, SOCKS5 on 8119)")
 	proxyHTTP   = flag.Int("proxy-http", 8118, "HTTP proxy port")
 	proxySOCKS  = flag.Int("proxy-socks", 8119, "SOCKS5 proxy port")
+	noUpdate    = flag.Bool("no-update", false, "Disable auto-updates")
+	checkUpdate = flag.Bool("check-update", false, "Check for updates and exit")
 )
 
 // Node represents a KayakNet P2P node
@@ -89,7 +95,10 @@ type Node struct {
 
 	// Gossip routing
 	seenMessages map[string]time.Time // MsgID -> first seen time (deduplication)
-	seenMu       sync.RWMutex         // Lock for seenMessages
+
+	// Auto-updater
+	updater *updater.Updater
+	seenMu  sync.RWMutex // Lock for seenMessages
 }
 
 // PeerConn represents a connection to a peer
@@ -115,6 +124,7 @@ const (
 	MsgTypePoWChallenge = 0x40 // Proof-of-work challenge (anti-Sybil)
 	MsgTypePoWResponse  = 0x41 // Proof-of-work response
 	MsgTypePoWVerified  = 0x42 // PoW verification acknowledgment
+	MsgTypeRelay        = 0x50 // Relay message to another peer
 )
 
 // P2PMessage is the wire format
@@ -124,8 +134,8 @@ type P2PMessage struct {
 	FromKey   []byte          `json:"from_key"`
 	Timestamp int64           `json:"ts"`
 	Nonce     uint64          `json:"nonce"`
-	TTL       int             `json:"ttl"`       // Time-to-live for gossip (hops remaining)
-	MsgID     string          `json:"msg_id"`    // Unique message ID for deduplication
+	TTL       int             `json:"ttl"`    // Time-to-live for gossip (hops remaining)
+	MsgID     string          `json:"msg_id"` // Unique message ID for deduplication
 	Payload   json.RawMessage `json:"payload"`
 	Signature []byte          `json:"sig"`
 }
@@ -183,9 +193,23 @@ func (h *Homepage) Start(port int) error {
 	mux.HandleFunc("/api/chat/search", h.handleChatSearch)
 	mux.HandleFunc("/api/chat/reaction", h.handleChatReaction)
 	mux.HandleFunc("/api/chat/block", h.handleChatBlock)
+	mux.HandleFunc("/api/chat/typing", h.handleChatTyping)
+	mux.HandleFunc("/api/chat/edit", h.handleChatEdit)
+	mux.HandleFunc("/api/chat/delete", h.handleChatDelete)
+	mux.HandleFunc("/api/chat/pin", h.handleChatPin)
+	mux.HandleFunc("/api/chat/pinned", h.handleChatPinned)
+	mux.HandleFunc("/api/chat/search-users", h.handleChatSearchUsers)
 	mux.HandleFunc("/api/domains", h.handleDomains)
+	mux.HandleFunc("/api/domains/register", h.handleDomainRegister)
+	mux.HandleFunc("/api/domains/my", h.handleMyDomains)
+	mux.HandleFunc("/api/domains/update", h.handleDomainUpdate)
+	mux.HandleFunc("/api/domains/renew", h.handleDomainRenew)
+	mux.HandleFunc("/api/domains/resolve", h.handleDomainResolve)
 	mux.HandleFunc("/api/peers", h.handlePeers)
 	mux.HandleFunc("/api/stats", h.handleStats)
+	mux.HandleFunc("/api/version", h.handleVersion)
+	mux.HandleFunc("/api/update", h.handleUpdateCheck)
+	mux.HandleFunc("/api/update/apply", h.handleUpdateApply)
 	mux.HandleFunc("/marketplace", h.handleMarketplace)
 	mux.HandleFunc("/chat", h.handleChatPage)
 	mux.HandleFunc("/domains", h.handleDomainsPage)
@@ -226,6 +250,24 @@ func (h *Homepage) Port() int {
 
 func main() {
 	flag.Parse()
+
+	// Handle --check-update flag
+	if *checkUpdate {
+		u := updater.NewUpdater(Version)
+		release, err := u.GetLatestVersion()
+		if err != nil {
+			fmt.Printf("Failed to check for updates: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Current version: %s\n", Version)
+		fmt.Printf("Latest version:  %s\n", release.TagName)
+		if release.TagName > Version {
+			fmt.Println("Update available!")
+		} else {
+			fmt.Println("You are running the latest version.")
+		}
+		os.Exit(0)
+	}
 
 	var cfg *config.Config
 	if *configPath != "" {
@@ -285,9 +327,20 @@ func main() {
 		} else {
 			fmt.Printf("║  [+] Browser proxy: HTTP %d, SOCKS5 %d                 ║\n", *proxyHTTP, *proxySOCKS)
 			fmt.Println("║  [+] Homepage: http://home.kyk                         ║")
+			fmt.Println("║  [+] Chat: http://chat.kyk  Market: http://market.kyk  ║")
 		}
 	}
 	fmt.Println("╚════════════════════════════════════════════════════════════╝")
+
+	// Start auto-updater (unless disabled)
+	if !*noUpdate {
+		node.updater = updater.NewUpdater(Version)
+		node.updater.SetUpdateCallback(func(oldVer, newVer string) {
+			log.Printf("[UPDATE] Update available: %s -> %s (will apply on restart)", oldVer, newVer)
+		})
+		node.updater.Start()
+		log.Printf("[UPDATE] Auto-updater enabled (current: %s)", Version)
+	}
 
 	if *interactive {
 		go node.interactiveMode()
@@ -298,6 +351,9 @@ func main() {
 	<-sigCh
 
 	fmt.Println("\nShutting down...")
+	if node.updater != nil {
+		node.updater.Stop()
+	}
 	node.Stop()
 }
 
@@ -502,6 +558,38 @@ func NewNode(cfg *config.Config, name string) (*Node, error) {
 		fmt.Printf("\n[CHAT] [%s] %s: %s\n> ", msg.Room, msg.Nick, msg.Content)
 	})
 
+	// Enable persistence for all components
+	dataDir := cfg.Node.DataDir
+
+	// Chat persistence
+	if err := n.chatMgr.SetDataDir(dataDir); err != nil {
+		log.Printf("[CHAT] Warning: Could not enable persistence: %v", err)
+	} else {
+		log.Printf("[CHAT] Persistence enabled in %s/chat", dataDir)
+	}
+
+	// Marketplace persistence
+	if err := n.marketplace.SetDataDir(dataDir); err != nil {
+		log.Printf("[MARKET] Warning: Could not enable persistence: %v", err)
+	}
+
+	// Domain/Names persistence
+	if err := n.nameService.SetDataDir(dataDir); err != nil {
+		log.Printf("[NAMES] Warning: Could not enable persistence: %v", err)
+	}
+
+	// E2E key persistence
+	n.e2e.SetDataDir(dataDir)
+
+	// Escrow persistence
+	if err := n.escrowMgr.SetDataDir(dataDir); err != nil {
+		log.Printf("[ESCROW] Warning: Could not enable persistence: %v", err)
+	}
+
+	// Security persistence (bans, peer scores)
+	n.banList.SetDataDir(dataDir)
+	n.peerScorer.SetDataDir(dataDir)
+
 	return n, nil
 }
 
@@ -561,13 +649,40 @@ func (n *Node) Start(addr string) error {
 
 // Stop stops the node
 func (n *Node) Stop() {
+	log.Println("[NODE] Shutting down and saving state...")
 	n.cancel()
 	n.mixer.Stop()
 	if n.listener != nil {
 		n.listener.Close()
 	}
+
+	// Save all persistent data
 	n.peerStore.Save()
 	n.pubsub.Close()
+
+	if n.marketplace != nil {
+		n.marketplace.Save()
+	}
+	if n.chatMgr != nil {
+		n.chatMgr.Save()
+	}
+	if n.nameService != nil {
+		n.nameService.Save()
+	}
+	if n.escrowMgr != nil {
+		n.escrowMgr.Save()
+	}
+	if n.banList != nil {
+		n.banList.Save()
+	}
+	if n.peerScorer != nil {
+		n.peerScorer.Save()
+	}
+	if n.e2e != nil {
+		n.e2e.Save()
+	}
+
+	log.Println("[NODE] State saved successfully")
 }
 
 // handleMessages processes incoming messages
@@ -693,6 +808,8 @@ func (n *Node) handleMessage(from net.Addr, msg *P2PMessage) {
 		n.handlePoWResponse(from, msg)
 	case MsgTypePoWVerified:
 		n.handlePoWVerified(msg)
+	case MsgTypeRelay:
+		n.handleRelay(from, msg)
 	}
 }
 
@@ -727,12 +844,18 @@ func (n *Node) forwardMessage(msg *P2PMessage, senderAddr string) {
 	n.mu.RUnlock()
 
 	// Forward to all other peers
+	forwarded := 0
 	for _, peer := range peers {
 		addr, err := net.ResolveUDPAddr("udp", peer.Address)
 		if err != nil {
 			continue
 		}
 		n.listener.WriteTo(data, addr)
+		forwarded++
+	}
+
+	if msg.Type == MsgTypeChat && forwarded > 0 {
+		log.Printf("[GOSSIP] Forwarded chat from %s to %d peers (TTL: %d)", msg.From[:8], forwarded, forwardMsg.TTL)
 	}
 }
 
@@ -840,6 +963,8 @@ func (n *Node) handleNodes(msg *P2PMessage) {
 
 // handleChat processes chat (may be onion-routed, always E2E encrypted)
 func (n *Node) handleChat(msg *P2PMessage) {
+	log.Printf("[CHAT] Received chat from %s (TTL: %d, MsgID: %s)", msg.From[:8], msg.TTL, msg.MsgID[:8])
+
 	// Register sender's key for future E2E encryption
 	if len(msg.FromKey) == ed25519.PublicKeySize {
 		n.e2e.AddPeerKey(msg.From, msg.FromKey)
@@ -852,6 +977,7 @@ func (n *Node) handleChat(msg *P2PMessage) {
 		decrypted, err := n.e2e.Decrypt(envelope)
 		if err != nil {
 			// Not for us or decryption failed - ignore silently
+			log.Printf("[CHAT] E2E decryption failed (not for us)")
 			return
 		}
 		msg.Payload = decrypted
@@ -1016,6 +1142,61 @@ func (n *Node) handlePoWVerified(msg *P2PMessage) {
 	}
 }
 
+// handleRelay processes relay messages - forward to the intended recipient
+func (n *Node) handleRelay(from net.Addr, msg *P2PMessage) {
+	var relay struct {
+		FinalDest string `json:"dest"`
+		MsgType   byte   `json:"type"`
+		Payload   []byte `json:"payload"`
+	}
+	if err := json.Unmarshal(msg.Payload, &relay); err != nil {
+		return
+	}
+
+	// Check if the final destination is us
+	if relay.FinalDest == n.identity.NodeID() {
+		// Process the inner message
+		innerMsg := &P2PMessage{
+			Type:      relay.MsgType,
+			From:      msg.From,
+			FromKey:   msg.FromKey,
+			Timestamp: msg.Timestamp,
+			Payload:   relay.Payload,
+			Signature: msg.Signature,
+		}
+		// Handle based on inner type
+		switch relay.MsgType {
+		case MsgTypeChat:
+			n.handleChat(innerMsg)
+		}
+		return
+	}
+
+	// Check if we're connected to the destination
+	n.mu.RLock()
+	dest, ok := n.connections[relay.FinalDest]
+	n.mu.RUnlock()
+
+	if ok {
+		// Forward the inner message to the destination
+		innerMsg := P2PMessage{
+			Type:      relay.MsgType,
+			From:      msg.From,
+			FromKey:   msg.FromKey,
+			Timestamp: msg.Timestamp,
+			Nonce:     security.GenerateNonce(),
+			Payload:   relay.Payload,
+			Signature: msg.Signature,
+		}
+		data, _ := json.Marshal(innerMsg)
+		addr, err := net.ResolveUDPAddr("udp", dest.Address)
+		if err == nil {
+			n.listener.WriteTo(data, addr)
+			log.Printf("[RELAY] Forwarded message from %s to %s", msg.From[:8], relay.FinalDest[:8])
+		}
+	}
+}
+
 // sendPoWChallenge sends a PoW challenge to a new node
 func (n *Node) sendPoWChallenge(addr net.Addr, nodeID string) {
 	challenge := n.powManager.GenerateChallenge(nodeID)
@@ -1115,10 +1296,19 @@ func (n *Node) sendDirect(to net.Addr, msgType byte, payload []byte) error {
 func (n *Node) sendAnonymous(destID string, msgType byte, payload []byte) error {
 	n.mu.RLock()
 	dest, ok := n.connections[destID]
+	allPeers := make([]*PeerConn, 0, len(n.connections))
+	for _, p := range n.connections {
+		allPeers = append(allPeers, p)
+	}
 	n.mu.RUnlock()
 
+	// If not directly connected, relay through a connected peer (like bootstrap)
 	if !ok {
-		return fmt.Errorf("peer not found")
+		// Try to relay through any connected peer
+		if len(allPeers) > 0 {
+			return n.relayToPeer(destID, msgType, payload, allPeers)
+		}
+		return fmt.Errorf("peer not found and no relay available")
 	}
 
 	// Check if we can use onion routing
@@ -1132,6 +1322,52 @@ func (n *Node) sendAnonymous(destID string, msgType byte, payload []byte) error 
 		return err
 	}
 	return n.sendDirect(addr, msgType, payload)
+}
+
+// relayToPeer sends a message to a peer we're not directly connected to
+// by relaying through connected peers (like bootstrap)
+func (n *Node) relayToPeer(destID string, msgType byte, payload []byte, relays []*PeerConn) error {
+	// Create a relay message that asks the relay to forward to destID
+	relayMsg := struct {
+		FinalDest string `json:"dest"`
+		MsgType   byte   `json:"type"`
+		Payload   []byte `json:"payload"`
+	}{destID, msgType, payload}
+
+	relayData, _ := json.Marshal(relayMsg)
+
+	// Create the outer message
+	msg := P2PMessage{
+		Type:      MsgTypeRelay,
+		From:      n.identity.NodeID(),
+		FromKey:   n.identity.PublicKey(),
+		Timestamp: time.Now().UnixNano(),
+		Nonce:     security.GenerateNonce(),
+		Payload:   relayData,
+	}
+	toSign, _ := json.Marshal(struct {
+		Type      byte   `json:"type"`
+		From      string `json:"from"`
+		Timestamp int64  `json:"ts"`
+		Payload   []byte `json:"payload"`
+	}{msg.Type, msg.From, msg.Timestamp, msg.Payload})
+	msg.Signature = n.identity.Sign(toSign)
+
+	data, _ := json.Marshal(msg)
+
+	// Send to first available relay
+	for _, relay := range relays {
+		addr, err := net.ResolveUDPAddr("udp", relay.Address)
+		if err != nil {
+			continue
+		}
+		_, err = n.listener.WriteTo(data, addr)
+		if err == nil {
+			log.Printf("[RELAY] Sent DM to %s via relay %s", destID[:8], relay.NodeID[:8])
+			return nil
+		}
+	}
+	return fmt.Errorf("failed to relay message")
 }
 
 // sendViaOnion sends through onion routing
@@ -1403,7 +1639,16 @@ func (n *Node) maintenance() {
 
 			n.capStore.CleanExpired()
 			n.nameService.CleanExpired()
+
+			// Periodic save of all persistent data
 			n.peerStore.Save()
+			n.marketplace.Save()
+			n.chatMgr.Save()
+			n.nameService.Save()
+			n.escrowMgr.Save()
+			n.banList.Save()
+			n.peerScorer.Save()
+			n.e2e.Save()
 		}
 	}
 }
@@ -1556,6 +1801,10 @@ func (n *Node) interactiveMode() {
 			n.cmdProxySetup()
 
 		// === SYSTEM ===
+		case "update":
+			n.cmdUpdate()
+		case "version":
+			fmt.Printf("KayakNet %s\n", Version)
 		case "quit", "q", "exit":
 			fmt.Println("Goodbye!")
 			n.cancel()
@@ -2022,11 +2271,45 @@ func (n *Node) cmdHelp() {
 |   status             - Anonymity status                     |
 |   info               - Node information                     |
 |                                                             |
-| quit/exit            - Exit KayakNet                        |
+| SYSTEM                                                      |
+|   update             - Check for updates and apply          |
+|   version            - Show current version                 |
+|   quit/exit          - Exit KayakNet                        |
 +-------------------------------------------------------------+
 
 HOMEPAGE: Browse to http://home.kyk or http://kayaknet.kyk
 `)
+}
+
+func (n *Node) cmdUpdate() {
+	fmt.Printf("[UPDATE] Current version: %s\n", Version)
+	fmt.Println("[UPDATE] Checking for updates...")
+
+	if n.updater == nil {
+		// Create temporary updater if disabled
+		n.updater = updater.NewUpdater(Version)
+	}
+
+	release, err := n.updater.GetLatestVersion()
+	if err != nil {
+		fmt.Printf("[UPDATE] Failed to check: %v\n", err)
+		return
+	}
+
+	fmt.Printf("[UPDATE] Latest version: %s\n", release.TagName)
+
+	if release.TagName <= Version {
+		fmt.Println("[UPDATE] You are running the latest version.")
+		return
+	}
+
+	fmt.Println("[UPDATE] New version available! Downloading...")
+	if err := n.updater.CheckAndUpdate(); err != nil {
+		fmt.Printf("[UPDATE] Failed to update: %v\n", err)
+		return
+	}
+
+	fmt.Println("[UPDATE] Update successful! Please restart KayakNet to use the new version.")
 }
 
 // ============================================================================
@@ -2862,9 +3145,91 @@ func (h *Homepage) handleChatBlock(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+func (h *Homepage) handleChatTyping(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method == "POST" {
+		room := r.FormValue("room")
+		if h.node != nil && room != "" {
+			h.node.chatMgr.SetTyping(room, h.node.identity.NodeID())
+		}
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	room := r.URL.Query().Get("room")
+	typing := []string{}
+	if h.node != nil && room != "" {
+		typing = h.node.chatMgr.GetTyping(room)
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"typing": typing})
+}
+
+func (h *Homepage) handleChatEdit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	msgID := r.FormValue("message_id")
+	content := r.FormValue("content")
+	if h.node != nil && msgID != "" {
+		if err := h.node.chatMgr.EditMessage(msgID, content, h.node.identity.NodeID()); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (h *Homepage) handleChatDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	msgID := r.FormValue("message_id")
+	if h.node != nil && msgID != "" {
+		if err := h.node.chatMgr.DeleteMessage(msgID, h.node.identity.NodeID()); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (h *Homepage) handleChatPin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	room := r.FormValue("room")
+	msgID := r.FormValue("message_id")
+	if h.node != nil && room != "" && msgID != "" {
+		h.node.chatMgr.PinMessage(room, msgID)
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (h *Homepage) handleChatPinned(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	room := r.URL.Query().Get("room")
+	var pinned []*chat.Message
+	if h.node != nil && room != "" {
+		pinned = h.node.chatMgr.GetPinnedMessages(room)
+	}
+	json.NewEncoder(w).Encode(pinned)
+}
+
+func (h *Homepage) handleChatSearchUsers(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	query := r.URL.Query().Get("q")
+	var users []*chat.User
+	if h.node != nil && query != "" {
+		users = h.node.chatMgr.SearchUsers(query)
+	}
+	json.NewEncoder(w).Encode(users)
+}
+
 func (h *Homepage) handleDomains(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("q")
-	var domains []map[string]string
+	var domains []map[string]interface{}
 
 	if h.node != nil {
 		var results []*names.Registration
@@ -2875,17 +3240,235 @@ func (h *Homepage) handleDomains(w http.ResponseWriter, r *http.Request) {
 		}
 
 		for _, d := range results {
-			domains = append(domains, map[string]string{
-				"name":        d.Name,
-				"full_name":   d.Name + ".kyk",
-				"description": d.Description,
-				"owner":       d.NodeID,
+			isOwner := d.NodeID == h.node.identity.NodeID()
+			domains = append(domains, map[string]interface{}{
+				"name":         d.Name,
+				"full_name":    d.Name + ".kyk",
+				"description":  d.Description,
+				"owner":        d.NodeID,
+				"address":      d.Address,
+				"service_type": d.ServiceType,
+				"created_at":   d.CreatedAt.Format("2006-01-02"),
+				"expires_at":   d.ExpiresAt.Format("2006-01-02"),
+				"is_owner":     isOwner,
 			})
 		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(domains)
+}
+
+func (h *Homepage) handleDomainRegister(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method != "POST" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "POST required",
+		})
+		return
+	}
+
+	var req struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		ServiceType string `json:"service_type"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "Invalid request body",
+		})
+		return
+	}
+
+	if req.Name == "" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "Domain name is required",
+		})
+		return
+	}
+
+	reg, err := h.node.nameService.Register(req.Name, req.Description, req.ServiceType)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	// Broadcast the registration to the network
+	h.broadcastDomainRegistration(reg)
+
+	// Save to disk
+	go h.node.nameService.Save()
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"domain":  reg.FullName,
+		"expires": reg.ExpiresAt.Format("2006-01-02"),
+		"message": "Domain registered successfully!",
+	})
+}
+
+func (h *Homepage) broadcastDomainRegistration(reg *names.Registration) {
+	if h.node == nil {
+		return
+	}
+
+	data, err := reg.Marshal()
+	if err != nil {
+		return
+	}
+
+	// Broadcast via gossip
+	h.node.broadcastGossip(MsgTypeNameReg, data)
+	log.Printf("[DOMAIN] Broadcast registration: %s", reg.FullName)
+}
+
+func (h *Homepage) handleMyDomains(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	var domains []map[string]interface{}
+
+	if h.node != nil {
+		results := h.node.nameService.MyDomains()
+
+		for _, d := range results {
+			domains = append(domains, map[string]interface{}{
+				"name":         d.Name,
+				"full_name":    d.Name + ".kyk",
+				"description":  d.Description,
+				"address":      d.Address,
+				"service_type": d.ServiceType,
+				"created_at":   d.CreatedAt.Format("2006-01-02"),
+				"expires_at":   d.ExpiresAt.Format("2006-01-02"),
+				"updated_at":   d.UpdatedAt.Format("2006-01-02 15:04"),
+			})
+		}
+	}
+
+	json.NewEncoder(w).Encode(domains)
+}
+
+func (h *Homepage) handleDomainUpdate(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method != "POST" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "POST required",
+		})
+		return
+	}
+
+	var req struct {
+		Name        string `json:"name"`
+		Address     string `json:"address"`
+		Description string `json:"description"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "Invalid request body",
+		})
+		return
+	}
+
+	if err := h.node.nameService.Update(req.Name, req.Address, req.Description); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	// Save to disk
+	go h.node.nameService.Save()
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "Domain updated successfully!",
+	})
+}
+
+func (h *Homepage) handleDomainRenew(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method != "POST" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "POST required",
+		})
+		return
+	}
+
+	var req struct {
+		Name string `json:"name"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "Invalid request body",
+		})
+		return
+	}
+
+	if err := h.node.nameService.Renew(req.Name); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	// Save to disk
+	go h.node.nameService.Save()
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "Domain renewed for another year!",
+	})
+}
+
+func (h *Homepage) handleDomainResolve(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	domain := r.URL.Query().Get("domain")
+	if domain == "" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "Domain parameter required",
+		})
+		return
+	}
+
+	reg, err := h.node.nameService.Resolve(domain)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":      true,
+		"name":         reg.Name,
+		"full_name":    reg.FullName,
+		"node_id":      reg.NodeID,
+		"address":      reg.Address,
+		"description":  reg.Description,
+		"service_type": reg.ServiceType,
+		"created_at":   reg.CreatedAt.Format("2006-01-02"),
+		"expires_at":   reg.ExpiresAt.Format("2006-01-02"),
+	})
 }
 
 func (h *Homepage) handlePeers(w http.ResponseWriter, r *http.Request) {
@@ -2909,6 +3492,7 @@ func (h *Homepage) handlePeers(w http.ResponseWriter, r *http.Request) {
 
 func (h *Homepage) handleStats(w http.ResponseWriter, r *http.Request) {
 	stats := map[string]interface{}{
+		"version":     Version,
 		"peers":       0,
 		"listings":    0,
 		"domains":     0,
@@ -2930,6 +3514,69 @@ func (h *Homepage) handleStats(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)
+}
+
+func (h *Homepage) handleVersion(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"version": Version,
+	})
+}
+
+func (h *Homepage) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	result := map[string]interface{}{
+		"current_version":  Version,
+		"latest_version":   Version,
+		"update_available": false,
+		"error":            "",
+	}
+
+	if h.node != nil && h.node.updater != nil {
+		release, err := h.node.updater.GetLatestVersion()
+		if err != nil {
+			result["error"] = err.Error()
+		} else {
+			result["latest_version"] = release.TagName
+			result["update_available"] = release.TagName > Version
+		}
+	}
+
+	json.NewEncoder(w).Encode(result)
+}
+
+func (h *Homepage) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method != "POST" {
+		http.Error(w, `{"error":"POST required"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.node == nil || h.node.updater == nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "Updater not initialized",
+		})
+		return
+	}
+
+	// Check and apply update
+	err := h.node.updater.CheckAndUpdate()
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":          true,
+		"message":          "Update applied successfully. Please restart KayakNet.",
+		"restart_required": true,
+	})
 }
 
 func (h *Homepage) handleMarketplace(w http.ResponseWriter, r *http.Request) {
@@ -4199,7 +4846,8 @@ const chatPageHTML = `<!DOCTYPE html>
                             <div class="input-row">
                                 <input type="file" id="file-input" class="file-input" accept="image/*,.pdf,.txt,.zip" onchange="handleFileSelect(event)">
                                 <button class="input-btn" onclick="document.getElementById('file-input').click()" title="Attach file">+FILE</button>
-                                <input type="text" id="message-input" placeholder="Type a message... (Shift+Enter for newline)" onkeydown="handleKeyDown(event)" oninput="handleTyping()">
+                                <button class="input-btn" id="voice-btn" onclick="toggleVoice()" title="Voice message">MIC</button>
+                                <input type="text" id="message-input" placeholder="Type *bold* _italic_ @mention... (Shift+Enter for newline)" onkeydown="handleKeyDown(event)" oninput="handleTyping()">
                                 <button class="input-btn" onclick="insertEmoji()">:)</button>
                                 <button class="input-btn primary" onclick="sendMessage()">SEND</button>
                             </div>
@@ -4248,6 +4896,10 @@ const chatPageHTML = `<!DOCTYPE html>
         let myProfile = null;
         let pendingAttachment = null;
         let typingTimeout = null;
+        let replyingTo = null;
+        let isRecording = false;
+        let mediaRecorder = null;
+        let audioChunks = [];
         
         // Initialize
         async function init() {
@@ -4327,11 +4979,15 @@ const chatPageHTML = `<!DOCTYPE html>
             const avatar = (m.nick || 'A')[0].toUpperCase();
             const time = new Date(m.timestamp).toLocaleTimeString();
             const shortId = m.sender_id ? m.sender_id.substring(0,8) : '';
+            const isMe = m.sender_id === myProfile?.id;
+            const isMention = m.content && myProfile && (m.content.includes('@' + myProfile.nick) || m.content.includes('@' + myProfile.id?.substring(0,8)));
             
             let mediaHtml = '';
             if (m.media) {
                 if (m.media.type && m.media.type.startsWith('image/')) {
                     mediaHtml = '<div class="media"><img src="data:' + m.media.type + ';base64,' + m.media.data + '" onclick="viewImage(this.src)" alt="' + escapeHtml(m.media.name) + '"></div>';
+                } else if (m.media.type && m.media.type.startsWith('audio/')) {
+                    mediaHtml = '<div class="media"><audio controls src="data:' + m.media.type + ';base64,' + m.media.data + '"></audio></div>';
                 } else if (m.media.name) {
                     mediaHtml = '<div class="media">[FILE: ' + escapeHtml(m.media.name) + ' (' + formatSize(m.media.size) + ')]</div>';
                 }
@@ -4345,17 +5001,94 @@ const chatPageHTML = `<!DOCTYPE html>
                     ).join('') + '</div>';
             }
             
-            return '<div class="message' + (m.type === 5 ? ' system' : '') + (m.receiver_id ? ' dm' : '') + '">' +
+            let replyHtml = '';
+            if (m.reply_to) {
+                replyHtml = '<div style="padding:5px 10px;margin-bottom:5px;background:rgba(0,255,0,0.03);border-left:2px solid var(--green-dim);font-size:12px;color:var(--green-dim);cursor:pointer;" onclick="scrollToMsg(\'' + m.reply_to + '\')">Reply to message</div>';
+            }
+            
+            let actionsHtml = '<div class="msg-actions" style="display:none;position:absolute;right:5px;top:5px;background:var(--bg);border:1px solid var(--border);padding:2px;">' +
+                '<span style="cursor:pointer;padding:3px;font-size:11px;" onclick="replyTo(\'' + m.id + '\', \'' + escapeHtml(m.nick || 'Anon') + '\', \'' + escapeHtml((m.content || '').substring(0,30)) + '\')" title="Reply">REPLY</span>' +
+                '<span style="cursor:pointer;padding:3px;font-size:11px;" onclick="addReaction(\'' + m.id + '\', \'👍\')" title="React">+</span>' +
+                (isMe ? '<span style="cursor:pointer;padding:3px;font-size:11px;" onclick="editMsg(\'' + m.id + '\')" title="Edit">EDIT</span>' : '') +
+                (isMe ? '<span style="cursor:pointer;padding:3px;font-size:11px;color:var(--red);" onclick="deleteMsg(\'' + m.id + '\')" title="Delete">DEL</span>' : '') +
+                '<span style="cursor:pointer;padding:3px;font-size:11px;" onclick="pinMsg(\'' + m.id + '\')" title="Pin">PIN</span>' +
+                '</div>';
+            
+            const formattedContent = formatContent(m.content || '');
+            
+            return '<div class="message' + (m.type === 5 ? ' system' : '') + (m.receiver_id ? ' dm' : '') + (isMention ? '" style="background:rgba(0,255,255,0.03);border-left-color:var(--cyan);' : '') + (m.edited ? ' edited' : '') + '" id="msg-' + m.id + '" onmouseenter="this.querySelector(\'.msg-actions\').style.display=\'flex\'" onmouseleave="this.querySelector(\'.msg-actions\').style.display=\'none\'" style="position:relative;">' +
+                actionsHtml +
+                replyHtml +
                 '<div class="message-header">' +
                 '<div class="avatar">' + avatar + '</div>' +
                 '<span class="nick" onclick="showProfile(\'' + m.sender_id + '\')">' + escapeHtml(m.nick || 'Anonymous') + '</span>' +
                 '<span class="user-id">' + shortId + '</span>' +
-                '<span class="time">' + time + '</span>' +
+                '<span class="time">' + time + (m.edited ? ' (edited)' : '') + '</span>' +
                 '</div>' +
-                '<div class="content">' + escapeHtml(m.content) + '</div>' +
+                '<div class="content">' + formattedContent + '</div>' +
                 mediaHtml +
                 reactionsHtml +
                 '</div>';
+        }
+        
+        function formatContent(content) {
+            if (!content) return '';
+            let html = escapeHtml(content);
+            html = html.replace(/\*([^*]+)\*/g, '<strong style="color:var(--green);">$1</strong>');
+            html = html.replace(/_([^_]+)_/g, '<em style="color:var(--cyan);">$1</em>');
+            html = html.replace(/\x60([^\x60]+)\x60/g, '<code style="background:rgba(0,255,0,0.1);padding:2px 5px;">$1</code>');
+            html = html.replace(/@(\w+)/g, '<span style="color:var(--amber);background:rgba(255,170,0,0.1);padding:0 3px;cursor:pointer;" onclick="findUser(\'$1\')">@$1</span>');
+            html = html.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" style="color:var(--cyan);">$1</a>');
+            return html;
+        }
+        
+        function replyTo(msgId, nick, content) {
+            replyingTo = msgId;
+            const preview = document.getElementById('attachment-preview');
+            preview.style.display = 'block';
+            preview.innerHTML = '<div style="border-left:2px solid var(--green);padding-left:10px;">Replying to <strong>' + nick + '</strong>: ' + content + '... <span onclick="cancelReply()" style="cursor:pointer;color:var(--red);">[X]</span></div>';
+            document.getElementById('message-input').focus();
+        }
+        
+        function cancelReply() {
+            replyingTo = null;
+            if (!pendingAttachment) {
+                document.getElementById('attachment-preview').style.display = 'none';
+            }
+        }
+        
+        function scrollToMsg(msgId) {
+            const el = document.getElementById('msg-' + msgId);
+            if (el) {
+                el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                el.style.background = 'rgba(0,255,255,0.1)';
+                setTimeout(() => el.style.background = '', 2000);
+            }
+        }
+        
+        async function editMsg(msgId) {
+            const newContent = prompt('Edit message:');
+            if (newContent !== null) {
+                await fetch('/api/chat/edit', { method: 'POST', body: new URLSearchParams({ message_id: msgId, content: newContent }) });
+                loadMessages();
+            }
+        }
+        
+        async function deleteMsg(msgId) {
+            if (confirm('Delete this message?')) {
+                await fetch('/api/chat/delete', { method: 'POST', body: new URLSearchParams({ message_id: msgId }) });
+                loadMessages();
+            }
+        }
+        
+        async function pinMsg(msgId) {
+            await fetch('/api/chat/pin', { method: 'POST', body: new URLSearchParams({ room: currentRoom, message_id: msgId }) });
+            alert('Message pinned!');
+        }
+        
+        function findUser(name) {
+            document.getElementById('user-search').value = name;
+            searchUsers();
         }
         
         async function loadOnlineUsers() {
@@ -4412,6 +5145,10 @@ const chatPageHTML = `<!DOCTYPE html>
             }
             formData.append('message', content);
             
+            if (replyingTo) {
+                formData.append('reply_to', replyingTo);
+            }
+            
             if (pendingAttachment) {
                 formData.append('media_type', pendingAttachment.type);
                 formData.append('media_name', pendingAttachment.name);
@@ -4422,6 +5159,7 @@ const chatPageHTML = `<!DOCTYPE html>
                 const endpoint = currentDM ? '/api/chat/dm' : '/api/chat';
                 await fetch(endpoint, { method: 'POST', body: formData });
                 input.value = '';
+                cancelReply();
                 clearAttachment();
                 loadMessages();
             } catch(e) { console.error('Failed to send:', e); }
@@ -4476,9 +5214,42 @@ const chatPageHTML = `<!DOCTYPE html>
         }
         
         function insertEmoji() {
-            const emojis = ['👍', '❤️', '😂', '🔥', '💯', '🚀', '✅', '⚡'];
+            const emojis = ['👍', '❤️', '😂', '🔥', '💯', '🚀', '✅', '⚡', '🤔', '😎', '🎉', '💪', '🙏', '👀'];
             const emoji = emojis[Math.floor(Math.random() * emojis.length)];
             document.getElementById('message-input').value += emoji;
+        }
+        
+        async function toggleVoice() {
+            const btn = document.getElementById('voice-btn');
+            if (!isRecording) {
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    mediaRecorder = new MediaRecorder(stream);
+                    audioChunks = [];
+                    mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+                    mediaRecorder.onstop = async () => {
+                        const blob = new Blob(audioChunks, { type: 'audio/webm' });
+                        const reader = new FileReader();
+                        reader.onload = () => {
+                            pendingAttachment = { type: 'audio/webm', name: 'voice_' + Date.now() + '.webm', size: blob.size, data: reader.result.split(',')[1] };
+                            sendMessage();
+                        };
+                        reader.readAsDataURL(blob);
+                        stream.getTracks().forEach(t => t.stop());
+                    };
+                    mediaRecorder.start();
+                    isRecording = true;
+                    btn.textContent = 'STOP';
+                    btn.style.background = 'var(--red)';
+                    btn.style.borderColor = 'var(--red)';
+                } catch(e) { alert('Could not access microphone'); }
+            } else {
+                mediaRecorder.stop();
+                isRecording = false;
+                btn.textContent = 'MIC';
+                btn.style.background = '';
+                btn.style.borderColor = '';
+            }
         }
         
         async function addReaction(msgId, emoji) {
@@ -4528,7 +5299,7 @@ const chatPageHTML = `<!DOCTYPE html>
         }
         
         async function blockUser(userId) {
-            if (confirm('Block this user? They won\\'t be able to DM you.')) {
+            if (confirm("Block this user? They will not be able to DM you.")) {
                 await fetch('/api/chat/block', { method: 'POST', body: new URLSearchParams({ user: userId }) });
                 closeModal('profile-modal');
             }
@@ -4594,7 +5365,7 @@ const domainsPageHTML = `<!DOCTYPE html>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=VT323&display=swap');
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        :root { --bg: #000; --green: #00ff00; --green-dim: #00aa00; --green-glow: #00ff0066; --border: #00ff0033; }
+        :root { --bg: #000; --green: #00ff00; --green-dim: #00aa00; --green-glow: #00ff0066; --border: #00ff0033; --amber: #ffaa00; --red: #ff4444; }
         body { font-family: 'VT323', monospace; background: var(--bg); color: var(--green); min-height: 100vh; }
         body::before { content: ""; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: repeating-linear-gradient(0deg, rgba(0,0,0,0.15) 0px, rgba(0,0,0,0.15) 1px, transparent 1px, transparent 2px); pointer-events: none; z-index: 1000; }
         .container { max-width: 1000px; margin: 0 auto; padding: 20px; }
@@ -4607,25 +5378,52 @@ const domainsPageHTML = `<!DOCTYPE html>
         nav { display: flex; gap: 15px; }
         nav a { color: var(--green-dim); text-decoration: none; padding: 5px 10px; border: 1px solid transparent; }
         nav a:hover, nav a.active { color: var(--green); border-color: var(--green); }
-        h1 { font-size: 24px; margin-bottom: 20px; }
-        h1::before { content: "> "; color: var(--green-dim); }
+        h1, h2 { font-size: 24px; margin-bottom: 20px; }
+        h1::before, h2::before { content: "> "; color: var(--green-dim); }
+        h2 { font-size: 18px; margin-top: 30px; color: var(--green-dim); }
+        .tabs { display: flex; gap: 10px; margin-bottom: 20px; }
+        .tab { padding: 10px 20px; background: transparent; border: 1px solid var(--border); color: var(--green-dim); cursor: pointer; font-family: inherit; font-size: 16px; }
+        .tab:hover, .tab.active { color: var(--green); border-color: var(--green); background: rgba(0,255,0,0.05); }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
         .search-bar { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
-        input { flex: 1; min-width: 200px; padding: 10px; background: var(--bg); border: 1px solid var(--green); color: var(--green); font-family: inherit; font-size: 16px; }
-        input:focus { outline: none; box-shadow: 0 0 10px var(--green-glow); }
+        input, select, textarea { flex: 1; min-width: 200px; padding: 10px; background: var(--bg); border: 1px solid var(--green); color: var(--green); font-family: inherit; font-size: 16px; }
+        input:focus, select:focus, textarea:focus { outline: none; box-shadow: 0 0 10px var(--green-glow); }
+        textarea { resize: vertical; min-height: 60px; }
         .btn { padding: 10px 20px; background: var(--green); color: var(--bg); border: none; cursor: pointer; font-family: inherit; font-size: 16px; }
         .btn:hover { box-shadow: 0 0 15px var(--green-glow); }
+        .btn-small { padding: 5px 10px; font-size: 14px; }
+        .btn-amber { background: var(--amber); }
+        .btn-red { background: var(--red); }
         .domains { display: grid; gap: 10px; }
-        .domain { border: 1px solid var(--border); padding: 15px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; background: var(--bg); }
+        .domain { border: 1px solid var(--border); padding: 15px; background: var(--bg); }
         .domain:hover { border-color: var(--green); box-shadow: 0 0 10px var(--green-glow); }
-        .domain-name { font-size: 20px; color: var(--green); text-shadow: 0 0 5px var(--green-glow); }
-        .domain-desc { color: var(--green-dim); font-size: 14px; margin-top: 5px; }
-        .domain-owner { color: var(--green-dim); font-size: 12px; opacity: 0.7; }
+        .domain-header { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 10px; }
+        .domain-name { font-size: 22px; color: var(--green); text-shadow: 0 0 5px var(--green-glow); }
+        .domain-name.owned { color: var(--amber); text-shadow: 0 0 5px rgba(255,170,0,0.5); }
+        .domain-desc { color: var(--green-dim); font-size: 14px; margin-top: 8px; }
+        .domain-meta { display: flex; gap: 15px; flex-wrap: wrap; margin-top: 10px; font-size: 12px; color: var(--green-dim); opacity: 0.8; }
+        .domain-actions { display: flex; gap: 5px; margin-top: 10px; }
+        .form-group { margin-bottom: 15px; }
+        .form-group label { display: block; margin-bottom: 5px; color: var(--green-dim); font-size: 14px; }
+        .form-row { display: flex; gap: 15px; flex-wrap: wrap; }
+        .form-row .form-group { flex: 1; min-width: 200px; }
+        .message { padding: 10px 15px; margin-bottom: 15px; border: 1px solid; }
+        .message.success { border-color: var(--green); color: var(--green); background: rgba(0,255,0,0.1); }
+        .message.error { border-color: var(--red); color: var(--red); background: rgba(255,0,0,0.1); }
+        .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 20px; }
+        .stat { border: 1px solid var(--border); padding: 15px; text-align: center; }
+        .stat-value { font-size: 28px; color: var(--green); text-shadow: 0 0 10px var(--green-glow); }
+        .stat-label { color: var(--green-dim); font-size: 12px; margin-top: 5px; text-transform: uppercase; }
+        .badge { display: inline-block; padding: 2px 8px; font-size: 12px; border: 1px solid; margin-left: 10px; }
+        .badge.owned { border-color: var(--amber); color: var(--amber); }
+        .badge.service { border-color: var(--green-dim); color: var(--green-dim); }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="terminal">
-            <div class="term-header">KAYAKNET DOMAIN REGISTRY // .KYK</div>
+            <div class="term-header">KAYAKNET DOMAIN REGISTRY // .KYK NAMING SYSTEM</div>
             <div class="term-body">
                 <header>
                     <a href="/" class="logo">KAYAKNET</a>
@@ -4636,31 +5434,270 @@ const domainsPageHTML = `<!DOCTYPE html>
                         <a href="/network">/network</a>
                     </nav>
                 </header>
-                <h1>.KYK_DOMAINS</h1>
-                <div class="search-bar">
-                    <input type="text" id="search" placeholder="dns://search..." />
-                    <button class="btn" onclick="alert('CMD: register [name]')">+REGISTER</button>
+                
+                <div class="stats">
+                    <div class="stat"><div class="stat-value" id="total-domains">0</div><div class="stat-label">Total Domains</div></div>
+                    <div class="stat"><div class="stat-value" id="my-domains">0</div><div class="stat-label">My Domains</div></div>
+                    <div class="stat"><div class="stat-value">1 YR</div><div class="stat-label">Registration Period</div></div>
                 </div>
-                <div class="domains" id="domains">
-                    <div class="domain"><div><div class="domain-name">LOADING...</div><div class="domain-desc">Querying DNS...</div></div></div>
+                
+                <div class="tabs">
+                    <button class="tab active" onclick="showTab('browse')">BROWSE</button>
+                    <button class="tab" onclick="showTab('register')">+REGISTER</button>
+                    <button class="tab" onclick="showTab('mydomains')">MY DOMAINS</button>
+                    <button class="tab" onclick="showTab('lookup')">WHOIS</button>
+                </div>
+                
+                <div id="message"></div>
+                
+                <!-- Browse Tab -->
+                <div id="tab-browse" class="tab-content active">
+                    <h2>BROWSE_DOMAINS</h2>
+                    <div class="search-bar">
+                        <input type="text" id="search" placeholder="dns://search domains..." oninput="loadDomains()" />
+                    </div>
+                    <div class="domains" id="domains">
+                        <div class="domain"><div class="domain-name">LOADING...</div></div>
+                    </div>
+                </div>
+                
+                <!-- Register Tab -->
+                <div id="tab-register" class="tab-content">
+                    <h2>REGISTER_DOMAIN</h2>
+                    <form onsubmit="registerDomain(event)">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>DOMAIN NAME</label>
+                                <input type="text" id="reg-name" placeholder="mydomain" pattern="[a-z0-9][a-z0-9-]*[a-z0-9]|[a-z0-9]" required />
+                            </div>
+                            <div class="form-group">
+                                <label>SERVICE TYPE (optional)</label>
+                                <select id="reg-type">
+                                    <option value="">-- None --</option>
+                                    <option value="website">Website</option>
+                                    <option value="chat">Chat Service</option>
+                                    <option value="market">Marketplace</option>
+                                    <option value="file">File Hosting</option>
+                                    <option value="api">API Service</option>
+                                    <option value="other">Other</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>DESCRIPTION (optional)</label>
+                            <textarea id="reg-desc" placeholder="What is this domain for?"></textarea>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                            <div style="color: var(--green-dim); font-size: 14px;">
+                                Your domain: <span id="preview-domain" style="color: var(--green);">----.kyk</span>
+                            </div>
+                            <button type="submit" class="btn">REGISTER DOMAIN</button>
+                        </div>
+                    </form>
+                </div>
+                
+                <!-- My Domains Tab -->
+                <div id="tab-mydomains" class="tab-content">
+                    <h2>MY_DOMAINS</h2>
+                    <div class="domains" id="my-domains-list">
+                        <div class="domain"><div class="domain-name">LOADING...</div></div>
+                    </div>
+                </div>
+                
+                <!-- Lookup/WHOIS Tab -->
+                <div id="tab-lookup" class="tab-content">
+                    <h2>WHOIS_LOOKUP</h2>
+                    <div class="search-bar">
+                        <input type="text" id="lookup-domain" placeholder="domain.kyk" />
+                        <button class="btn" onclick="lookupDomain()">RESOLVE</button>
+                    </div>
+                    <div id="lookup-result" style="margin-top: 20px;"></div>
                 </div>
             </div>
         </div>
     </div>
     <script>
+        function showTab(tab) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            document.querySelector('[onclick="showTab(\'' + tab + '\')"]').classList.add('active');
+            document.getElementById('tab-' + tab).classList.add('active');
+            if (tab === 'mydomains') loadMyDomains();
+        }
+        
+        function showMessage(msg, type) {
+            const el = document.getElementById('message');
+            el.className = 'message ' + type;
+            el.textContent = msg;
+            el.style.display = 'block';
+            setTimeout(() => el.style.display = 'none', 5000);
+        }
+        
         async function loadDomains() {
             const search = document.getElementById('search').value;
-            const res = await fetch('/api/domains?q=' + search);
+            const res = await fetch('/api/domains?q=' + encodeURIComponent(search));
             const domains = await res.json();
             const container = document.getElementById('domains');
+            
+            document.getElementById('total-domains').textContent = domains ? domains.length : 0;
+            
             if (!domains || domains.length === 0) {
-                container.innerHTML = '<div class="domain"><div><div class="domain-name">NO_RECORDS</div><div class="domain-desc">// Register the first .kyk domain</div></div></div>';
+                container.innerHTML = '<div class="domain"><div class="domain-name">NO_RECORDS_FOUND</div><div class="domain-desc">// Register the first .kyk domain!</div></div>';
                 return;
             }
-            container.innerHTML = domains.map(d => '<div class="domain"><div><div class="domain-name">' + d.full_name.toUpperCase() + '</div><div class="domain-desc">' + (d.description || '// No description') + '</div></div><div class="domain-owner">OWNER: ' + d.owner.substring(0, 16) + '...</div></div>').join('');
+            
+            container.innerHTML = domains.map(d => {
+                let badges = '';
+                if (d.is_owner) badges += '<span class="badge owned">OWNED</span>';
+                if (d.service_type) badges += '<span class="badge service">' + d.service_type.toUpperCase() + '</span>';
+                return '<div class="domain">' +
+                    '<div class="domain-header">' +
+                        '<div><div class="domain-name' + (d.is_owner ? ' owned' : '') + '">' + d.full_name.toUpperCase() + badges + '</div></div>' +
+                    '</div>' +
+                    '<div class="domain-desc">' + (d.description || '// No description') + '</div>' +
+                    '<div class="domain-meta">' +
+                        '<span>OWNER: ' + d.owner.substring(0, 16) + '...</span>' +
+                        '<span>EXPIRES: ' + d.expires_at + '</span>' +
+                        (d.address ? '<span>ADDR: ' + d.address + '</span>' : '') +
+                    '</div>' +
+                '</div>';
+            }).join('');
         }
-        document.getElementById('search').addEventListener('input', loadDomains);
+        
+        async function loadMyDomains() {
+            const res = await fetch('/api/domains/my');
+            const domains = await res.json();
+            const container = document.getElementById('my-domains-list');
+            
+            document.getElementById('my-domains').textContent = domains ? domains.length : 0;
+            
+            if (!domains || domains.length === 0) {
+                container.innerHTML = '<div class="domain"><div class="domain-name">NO_DOMAINS_OWNED</div><div class="domain-desc">// Register your first .kyk domain!</div></div>';
+                return;
+            }
+            
+            container.innerHTML = domains.map(d => {
+                return '<div class="domain">' +
+                    '<div class="domain-header">' +
+                        '<div><div class="domain-name owned">' + d.full_name.toUpperCase() + '</div></div>' +
+                    '</div>' +
+                    '<div class="domain-desc">' + (d.description || '// No description') + '</div>' +
+                    '<div class="domain-meta">' +
+                        '<span>CREATED: ' + d.created_at + '</span>' +
+                        '<span>EXPIRES: ' + d.expires_at + '</span>' +
+                        '<span>UPDATED: ' + d.updated_at + '</span>' +
+                    '</div>' +
+                    '<div class="domain-actions">' +
+                        '<button class="btn btn-small" onclick="editDomain(\'' + d.name + '\', \'' + (d.address || '') + '\', \'' + (d.description || '').replace(/'/g, "\\'") + '\')">EDIT</button>' +
+                        '<button class="btn btn-small btn-amber" onclick="renewDomain(\'' + d.name + '\')">RENEW</button>' +
+                    '</div>' +
+                '</div>';
+            }).join('');
+        }
+        
+        document.getElementById('reg-name').addEventListener('input', function(e) {
+            const name = e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '');
+            e.target.value = name;
+            document.getElementById('preview-domain').textContent = name ? name + '.kyk' : '----.kyk';
+        });
+        
+        async function registerDomain(e) {
+            e.preventDefault();
+            const name = document.getElementById('reg-name').value;
+            const desc = document.getElementById('reg-desc').value;
+            const type = document.getElementById('reg-type').value;
+            
+            const res = await fetch('/api/domains/register', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, description: desc, service_type: type })
+            });
+            const data = await res.json();
+            
+            if (data.success) {
+                showMessage('Domain ' + data.domain + ' registered successfully! Expires: ' + data.expires, 'success');
+                document.getElementById('reg-name').value = '';
+                document.getElementById('reg-desc').value = '';
+                document.getElementById('reg-type').value = '';
+                document.getElementById('preview-domain').textContent = '----.kyk';
+                loadDomains();
+                loadMyDomains();
+            } else {
+                showMessage('Error: ' + data.error, 'error');
+            }
+        }
+        
+        async function editDomain(name, address, description) {
+            const newAddr = prompt('Enter new address (or leave empty):', address);
+            const newDesc = prompt('Enter new description (or leave empty):', description);
+            
+            if (newAddr === null && newDesc === null) return;
+            
+            const res = await fetch('/api/domains/update', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, address: newAddr || '', description: newDesc || '' })
+            });
+            const data = await res.json();
+            
+            if (data.success) {
+                showMessage('Domain updated successfully!', 'success');
+                loadMyDomains();
+            } else {
+                showMessage('Error: ' + data.error, 'error');
+            }
+        }
+        
+        async function renewDomain(name) {
+            if (!confirm('Renew ' + name + '.kyk for another year?')) return;
+            
+            const res = await fetch('/api/domains/renew', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name })
+            });
+            const data = await res.json();
+            
+            if (data.success) {
+                showMessage(data.message, 'success');
+                loadMyDomains();
+            } else {
+                showMessage('Error: ' + data.error, 'error');
+            }
+        }
+        
+        async function lookupDomain() {
+            const domain = document.getElementById('lookup-domain').value;
+            if (!domain) {
+                showMessage('Enter a domain to lookup', 'error');
+                return;
+            }
+            
+            const res = await fetch('/api/domains/resolve?domain=' + encodeURIComponent(domain));
+            const data = await res.json();
+            const container = document.getElementById('lookup-result');
+            
+            if (!data.success) {
+                container.innerHTML = '<div class="domain"><div class="domain-name" style="color: var(--red);">NOT_FOUND</div><div class="domain-desc">' + data.error + '</div></div>';
+                return;
+            }
+            
+            container.innerHTML = '<div class="domain">' +
+                '<div class="domain-name">' + data.full_name.toUpperCase() + '</div>' +
+                '<div class="domain-desc">' + (data.description || '// No description') + '</div>' +
+                '<div class="domain-meta" style="flex-direction: column; align-items: flex-start; gap: 5px;">' +
+                    '<span>NODE_ID: ' + data.node_id + '</span>' +
+                    (data.address ? '<span>ADDRESS: ' + data.address + '</span>' : '') +
+                    (data.service_type ? '<span>SERVICE: ' + data.service_type.toUpperCase() + '</span>' : '') +
+                    '<span>CREATED: ' + data.created_at + '</span>' +
+                    '<span>EXPIRES: ' + data.expires_at + '</span>' +
+                '</div>' +
+            '</div>';
+        }
+        
+        // Initialize
         loadDomains();
+        loadMyDomains();
     </script>
 </body>
 </html>`
@@ -4733,9 +5770,14 @@ const networkPageHTML = `<!DOCTYPE html>
                         <div class="status-value" id="relay-count">0</div>
                     </div>
                     <div class="status-card">
-                        <h3>HOPS</h3>
-                        <div class="status-value">3</div>
+                        <h3>VERSION</h3>
+                        <div class="status-value" id="version" style="font-size:18px">--</div>
                     </div>
+                </div>
+                <div id="update-section" style="display:none; margin-bottom: 20px; padding: 15px; border: 1px solid var(--amber); background: rgba(255,170,0,0.1);">
+                    <span style="color: var(--amber);">[UPDATE]</span> New version available: <span id="new-version"></span>
+                    <button onclick="applyUpdate()" style="margin-left: 15px; padding: 5px 15px; background: var(--amber); color: #000; border: none; cursor: pointer; font-family: inherit;">DOWNLOAD & INSTALL</button>
+                    <span id="update-status" style="margin-left: 10px;"></span>
                 </div>
                 <h2>CONNECTED_PEERS</h2>
                 <div class="peers" id="peers">
@@ -4767,8 +5809,43 @@ const networkPageHTML = `<!DOCTYPE html>
             }
             container.innerHTML = peers.map(p => '<div class="peer"><span class="peer-id">' + p.id + '</span><span class="peer-status">PING: ' + p.last_seen + '</span></div>').join('');
         }
+        async function checkUpdates() {
+            try {
+                const res = await fetch('/api/update');
+                const data = await res.json();
+                document.getElementById('version').textContent = data.current_version || '--';
+                if (data.update_available) {
+                    document.getElementById('update-section').style.display = 'block';
+                    document.getElementById('new-version').textContent = data.latest_version;
+                }
+            } catch(e) {
+                console.error('Update check failed:', e);
+            }
+        }
+        async function applyUpdate() {
+            const status = document.getElementById('update-status');
+            status.textContent = 'DOWNLOADING...';
+            status.style.color = 'var(--amber)';
+            try {
+                const res = await fetch('/api/update/apply', { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    status.textContent = 'SUCCESS! RESTART REQUIRED';
+                    status.style.color = 'var(--green)';
+                    alert('Update installed successfully! Please restart KayakNet to use the new version.');
+                } else {
+                    status.textContent = 'FAILED: ' + (data.error || 'Unknown error');
+                    status.style.color = '#ff0000';
+                }
+            } catch(e) {
+                status.textContent = 'ERROR: ' + e.message;
+                status.style.color = '#ff0000';
+            }
+        }
         loadNetwork();
+        checkUpdates();
         setInterval(loadNetwork, 5000);
+        setInterval(checkUpdates, 60000);
     </script>
 </body>
 </html>`

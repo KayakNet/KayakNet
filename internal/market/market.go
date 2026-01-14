@@ -8,6 +8,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -238,6 +240,7 @@ type Marketplace struct {
 	localKey      ed25519.PublicKey
 	localPriv     ed25519.PrivateKey
 	signFunc      func([]byte) []byte
+	dataDir       string                     // Directory for persistent storage
 }
 
 // NewMarketplace creates a new marketplace
@@ -273,6 +276,141 @@ func NewMarketplace(localID string, pubKey ed25519.PublicKey, privKey ed25519.Pr
 	}
 	
 	return m
+}
+
+// SetDataDir sets the data directory for persistence
+func (m *Marketplace) SetDataDir(dataDir string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	
+	m.dataDir = filepath.Join(dataDir, "market")
+	if err := os.MkdirAll(m.dataDir, 0700); err != nil {
+		return err
+	}
+	
+	// Load existing data
+	m.loadData()
+	return nil
+}
+
+// MarketData holds all marketplace data for persistence
+type MarketData struct {
+	Listings      map[string]*Listing           `json:"listings"`
+	Reviews       map[string][]*Review          `json:"reviews"`
+	SellerReviews map[string][]*Review          `json:"seller_reviews"`
+	Orders        map[string]*Order             `json:"orders"`
+	MyOrders      map[string]bool               `json:"my_orders"`
+	SellerOrders  map[string][]string           `json:"seller_orders"`
+	Conversations map[string]*Conversation      `json:"conversations"`
+	MyConversations []string                    `json:"my_conversations"`
+	Disputes      map[string]*Dispute           `json:"disputes"`
+	Favorites     map[string][]string           `json:"favorites"`
+	Profiles      map[string]*SellerProfile     `json:"profiles"`
+	MyListings    map[string]bool               `json:"my_listings"`
+}
+
+// Save persists all marketplace data to disk
+func (m *Marketplace) Save() error {
+	if m.dataDir == "" {
+		return nil // No persistence configured
+	}
+	
+	m.mu.RLock()
+	data := MarketData{
+		Listings:        m.listings,
+		Reviews:         m.reviews,
+		SellerReviews:   m.sellerReviews,
+		Orders:          m.orders,
+		MyOrders:        m.myOrders,
+		SellerOrders:    m.sellerOrders,
+		Conversations:   m.conversations,
+		MyConversations: m.myConversations,
+		Disputes:        m.disputes,
+		Favorites:       m.favorites,
+		Profiles:        m.profiles,
+		MyListings:      m.myListings,
+	}
+	m.mu.RUnlock()
+	
+	path := filepath.Join(m.dataDir, "market.json")
+	tmpPath := path + ".tmp"
+	
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return err
+	}
+	
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(data); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	
+	if err := f.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	
+	return os.Rename(tmpPath, path)
+}
+
+// loadData loads marketplace data from disk
+func (m *Marketplace) loadData() {
+	if m.dataDir == "" {
+		return
+	}
+	
+	path := filepath.Join(m.dataDir, "market.json")
+	f, err := os.Open(path)
+	if err != nil {
+		return // File doesn't exist yet
+	}
+	defer f.Close()
+	
+	var data MarketData
+	if err := json.NewDecoder(f).Decode(&data); err != nil {
+		return
+	}
+	
+	// Restore data
+	if data.Listings != nil {
+		m.listings = data.Listings
+	}
+	if data.Reviews != nil {
+		m.reviews = data.Reviews
+	}
+	if data.SellerReviews != nil {
+		m.sellerReviews = data.SellerReviews
+	}
+	if data.Orders != nil {
+		m.orders = data.Orders
+	}
+	if data.MyOrders != nil {
+		m.myOrders = data.MyOrders
+	}
+	if data.SellerOrders != nil {
+		m.sellerOrders = data.SellerOrders
+	}
+	if data.Conversations != nil {
+		m.conversations = data.Conversations
+	}
+	if data.MyConversations != nil {
+		m.myConversations = data.MyConversations
+	}
+	if data.Disputes != nil {
+		m.disputes = data.Disputes
+	}
+	if data.Favorites != nil {
+		m.favorites = data.Favorites
+	}
+	if data.Profiles != nil {
+		m.profiles = data.Profiles
+	}
+	if data.MyListings != nil {
+		m.myListings = data.MyListings
+	}
 }
 
 // SetLocalName sets the local user's display name
@@ -336,6 +474,9 @@ func (m *Marketplace) CreateListingFull(title, description, category string, pri
 	m.listings[listing.ID] = listing
 	m.myListings[listing.ID] = true
 	m.mu.Unlock()
+
+	// Persist to disk
+	go m.Save()
 
 	return listing, nil
 }
@@ -412,6 +553,9 @@ func (m *Marketplace) AddListing(listing *Listing) error {
 	m.listings[listing.ID] = listing
 	m.mu.Unlock()
 
+	// Persist to disk
+	go m.Save()
+
 	return nil
 }
 
@@ -426,6 +570,10 @@ func (m *Marketplace) RemoveListing(id string) error {
 
 	delete(m.listings, id)
 	delete(m.myListings, id)
+	
+	// Persist to disk
+	go m.Save()
+	
 	return nil
 }
 

@@ -9,10 +9,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/icholy/digest"
 )
 
 var (
@@ -168,7 +171,14 @@ func (w *CryptoWallet) generateMoneroAddress(orderID string) (*PaymentAddress, e
 		return nil, fmt.Errorf("monero RPC error: %w", err)
 	}
 	
+	if result == nil {
+		return nil, fmt.Errorf("monero RPC returned nil result")
+	}
+	
 	address, _ := result["address"].(string)
+	if address == "" {
+		return nil, fmt.Errorf("monero RPC returned empty address, result: %+v", result)
+	}
 	addressIndex, _ := result["address_index"].(float64)
 	
 	return &PaymentAddress{
@@ -402,7 +412,7 @@ func (w *CryptoWallet) GetAddress(orderID string) (*PaymentAddress, error) {
 	return addr, nil
 }
 
-// Monero RPC helper
+// Monero RPC helper - uses digest authentication
 func (w *CryptoWallet) moneroRPC(method string, params interface{}) (map[string]interface{}, error) {
 	if w.config.MoneroRPCHost == "" {
 		return nil, ErrWalletNotConfigured
@@ -416,36 +426,54 @@ func (w *CryptoWallet) moneroRPC(method string, params interface{}) (map[string]
 	}
 	
 	jsonBody, _ := json.Marshal(body)
+	url := "http://" + w.config.MoneroRPCHost + "/json_rpc"
 	
-	req, _ := http.NewRequest("POST", "http://"+w.config.MoneroRPCHost+"/json_rpc", strings.NewReader(string(jsonBody)))
-	req.Header.Set("Content-Type", "application/json")
-	
-	if w.config.MoneroRPCUser != "" {
-		req.SetBasicAuth(w.config.MoneroRPCUser, w.config.MoneroRPCPassword)
+	// Create HTTP client with digest auth transport
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &digest.Transport{
+			Username: w.config.MoneroRPCUser,
+			Password: w.config.MoneroRPCPassword,
+		},
 	}
 	
-	resp, err := w.httpClient.Do(req)
+	req, _ := http.NewRequest("POST", url, strings.NewReader(string(jsonBody)))
+	req.Header.Set("Content-Type", "application/json")
+	
+	resp, err := client.Do(req)
 	if err != nil {
+		log.Printf("[MONERO RPC] Request failed: %v", err)
 		return nil, err
 	}
 	defer resp.Body.Close()
 	
 	respBody, _ := io.ReadAll(resp.Body)
+	log.Printf("[MONERO RPC] Response status: %d", resp.StatusCode)
+	
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("[MONERO RPC] Error response: %s", string(respBody))
+		return nil, fmt.Errorf("RPC error: status %d", resp.StatusCode)
+	}
 	
 	var result map[string]interface{}
-	json.Unmarshal(respBody, &result)
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		log.Printf("[MONERO RPC] JSON unmarshal error: %v", err)
+		return nil, fmt.Errorf("invalid JSON response: %w", err)
+	}
 	
 	if errObj, ok := result["error"]; ok {
 		errMap, _ := errObj.(map[string]interface{})
 		errMsg, _ := errMap["message"].(string)
+		log.Printf("[MONERO RPC] Error response: %s", errMsg)
 		return nil, errors.New(errMsg)
 	}
 	
 	resultData, _ := result["result"].(map[string]interface{})
+	log.Printf("[MONERO RPC] Success!")
 	return resultData, nil
 }
 
-// Zcash RPC helper
+// Zcash RPC helper - uses basic authentication
 func (w *CryptoWallet) zcashRPC(method string, params interface{}) (interface{}, error) {
 	if w.config.ZcashRPCHost == "" {
 		return nil, ErrWalletNotConfigured
@@ -459,8 +487,9 @@ func (w *CryptoWallet) zcashRPC(method string, params interface{}) (interface{},
 	}
 	
 	jsonBody, _ := json.Marshal(body)
+	url := "http://" + w.config.ZcashRPCHost
 	
-	req, _ := http.NewRequest("POST", "http://"+w.config.ZcashRPCHost, strings.NewReader(string(jsonBody)))
+	req, _ := http.NewRequest("POST", url, strings.NewReader(string(jsonBody)))
 	req.Header.Set("Content-Type", "application/json")
 	
 	if w.config.ZcashRPCUser != "" {
@@ -469,21 +498,33 @@ func (w *CryptoWallet) zcashRPC(method string, params interface{}) (interface{},
 	
 	resp, err := w.httpClient.Do(req)
 	if err != nil {
+		log.Printf("[ZCASH RPC] Request failed: %v", err)
 		return nil, err
 	}
 	defer resp.Body.Close()
 	
 	respBody, _ := io.ReadAll(resp.Body)
+	log.Printf("[ZCASH RPC] Response status: %d", resp.StatusCode)
+	
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("[ZCASH RPC] Error response: %s", string(respBody))
+		return nil, fmt.Errorf("RPC error: status %d", resp.StatusCode)
+	}
 	
 	var result map[string]interface{}
-	json.Unmarshal(respBody, &result)
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		log.Printf("[ZCASH RPC] JSON unmarshal error: %v", err)
+		return nil, fmt.Errorf("invalid JSON response: %w", err)
+	}
 	
 	if errObj, ok := result["error"]; ok && errObj != nil {
 		errMap, _ := errObj.(map[string]interface{})
 		errMsg, _ := errMap["message"].(string)
+		log.Printf("[ZCASH RPC] Error response: %s", errMsg)
 		return nil, errors.New(errMsg)
 	}
 	
+	log.Printf("[ZCASH RPC] Success!")
 	return result["result"], nil
 }
 

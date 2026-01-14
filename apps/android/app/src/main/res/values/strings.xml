@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">KayakNet</string>
+    <string name="notification_service_channel">KayakNet Service</string>
+    <string name="notification_message_channel">Messages</string>
+</resources>
+

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"os"
 	"sync"
 	"time"
 )
@@ -98,6 +99,7 @@ type EscrowManager struct {
 	orderEscrows map[string]string        // orderID -> escrowID
 	wallet       *CryptoWallet
 	feePercent   float64                  // Platform fee percentage
+	dataDir      string                   // Directory for persistent storage
 	
 	// Callbacks
 	onStateChange func(*Escrow, EscrowState)
@@ -110,6 +112,90 @@ func NewEscrowManager(wallet *CryptoWallet, feePercent float64) *EscrowManager {
 		orderEscrows: make(map[string]string),
 		wallet:       wallet,
 		feePercent:   feePercent,
+	}
+}
+
+// SetDataDir sets the data directory for persistence
+func (m *EscrowManager) SetDataDir(dataDir string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	
+	m.dataDir = dataDir
+	if err := os.MkdirAll(m.dataDir, 0700); err != nil {
+		return err
+	}
+	
+	// Load existing data
+	m.loadData()
+	return nil
+}
+
+// EscrowData holds all escrow data for persistence
+type EscrowData struct {
+	Escrows      map[string]*Escrow `json:"escrows"`
+	OrderEscrows map[string]string  `json:"order_escrows"`
+}
+
+// Save persists escrow data to disk
+func (m *EscrowManager) Save() error {
+	if m.dataDir == "" {
+		return nil
+	}
+	
+	m.mu.RLock()
+	data := EscrowData{
+		Escrows:      m.escrows,
+		OrderEscrows: m.orderEscrows,
+	}
+	m.mu.RUnlock()
+	
+	path := m.dataDir + "/escrows.json"
+	tmpPath := path + ".tmp"
+	
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return err
+	}
+	
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(data); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	
+	if err := f.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	
+	return os.Rename(tmpPath, path)
+}
+
+// loadData loads escrow data from disk
+func (m *EscrowManager) loadData() {
+	if m.dataDir == "" {
+		return
+	}
+	
+	path := m.dataDir + "/escrows.json"
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	
+	var data EscrowData
+	if err := json.NewDecoder(f).Decode(&data); err != nil {
+		return
+	}
+	
+	if data.Escrows != nil {
+		m.escrows = data.Escrows
+	}
+	if data.OrderEscrows != nil {
+		m.orderEscrows = data.OrderEscrows
 	}
 }
 
@@ -567,6 +653,91 @@ func UnmarshalEscrow(data []byte) (*Escrow, error) {
 	var e Escrow
 	err := json.Unmarshal(data, &e)
 	return &e, err
+}
+
+// CreateEscrowFromRequest creates an escrow from a P2P request (used by bootstrap)
+func (m *EscrowManager) CreateEscrowFromRequest(escrowID, orderID, buyerID, sellerID string, amount float64, currency, escrowAddress string) *Escrow {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	
+	// Determine crypto type
+	cryptoType := CryptoXMR
+	if currency == "ZEC" {
+		cryptoType = CryptoZEC
+	}
+	
+	// Calculate fee
+	feeAmount := amount * (m.feePercent / 100)
+	
+	escrow := &Escrow{
+		ID:            escrowID,
+		OrderID:       orderID,
+		BuyerID:       buyerID,
+		SellerID:      sellerID,
+		Currency:      cryptoType,
+		Amount:        amount,
+		AmountAtomic:  ConvertToAtomic(cryptoType, amount),
+		EscrowAddress: escrowAddress,
+		FeePercent:    m.feePercent,
+		FeeAmount:     feeAmount,
+		State:         StateCreated,
+		CreatedAt:     time.Now(),
+		ExpiresAt:     time.Now().Add(24 * time.Hour),
+		Messages:      []EscrowMessage{},
+	}
+	
+	m.escrows[escrowID] = escrow
+	m.orderEscrows[orderID] = escrowID
+	
+	return escrow
+}
+
+// ReleaseFunds releases funds to seller (alias for Release)
+func (m *EscrowManager) ReleaseFunds(escrowID string) error {
+	return m.Release(escrowID)
+}
+
+// OpenDisputeWithSender opens dispute with sender info (for P2P)
+func (m *EscrowManager) OpenDisputeWithSender(escrowID, senderID, reason string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	
+	escrow, ok := m.escrows[escrowID]
+	if !ok {
+		return ErrEscrowNotFound
+	}
+	
+	// Verify sender is buyer or seller
+	if senderID != escrow.BuyerID && senderID != escrow.SellerID {
+		return errors.New("only buyer or seller can open dispute")
+	}
+	
+	if escrow.State != StateFunded && escrow.State != StateShipped {
+		return ErrInvalidState
+	}
+	
+	escrow.State = StateDisputed
+	escrow.DisputeID = generateEscrowID()
+	escrow.DisputeReason = reason
+	escrow.AutoReleaseEnabled = false
+	
+	// Add message about who opened
+	role := "buyer"
+	if senderID == escrow.SellerID {
+		role = "seller"
+	}
+	escrow.Messages = append(escrow.Messages, EscrowMessage{
+		ID:        generateEscrowID()[:16],
+		From:      "system",
+		Content:   "Dispute opened by " + role + ": " + reason,
+		CreatedAt: time.Now(),
+	})
+	
+	if m.onStateChange != nil {
+		m.onStateChange(escrow, StateDisputed)
+	}
+	
+	return nil
 }
 
 func generateEscrowID() string {

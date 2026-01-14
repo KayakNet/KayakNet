@@ -8,6 +8,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -68,6 +70,7 @@ type NameService struct {
 	localID     string
 	localKey    ed25519.PublicKey
 	signFunc    func([]byte) []byte
+	dataDir     string                   // Directory for persistent storage
 }
 
 // NewNameService creates a new name service
@@ -78,6 +81,90 @@ func NewNameService(localID string, pubKey ed25519.PublicKey, signFunc func([]by
 		localID:  localID,
 		localKey: pubKey,
 		signFunc: signFunc,
+	}
+}
+
+// SetDataDir sets the data directory for persistence
+func (ns *NameService) SetDataDir(dataDir string) error {
+	ns.mu.Lock()
+	defer ns.mu.Unlock()
+	
+	ns.dataDir = filepath.Join(dataDir, "names")
+	if err := os.MkdirAll(ns.dataDir, 0700); err != nil {
+		return err
+	}
+	
+	// Load existing data
+	ns.loadData()
+	return nil
+}
+
+// NamesData holds domain data for persistence
+type NamesData struct {
+	Names    map[string]*Registration `json:"names"`
+	ByNodeID map[string][]string      `json:"by_node_id"`
+}
+
+// Save persists domain data to disk
+func (ns *NameService) Save() error {
+	if ns.dataDir == "" {
+		return nil
+	}
+	
+	ns.mu.RLock()
+	data := NamesData{
+		Names:    ns.names,
+		ByNodeID: ns.byNodeID,
+	}
+	ns.mu.RUnlock()
+	
+	path := filepath.Join(ns.dataDir, "names.json")
+	tmpPath := path + ".tmp"
+	
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return err
+	}
+	
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(data); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	
+	if err := f.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	
+	return os.Rename(tmpPath, path)
+}
+
+// loadData loads domain data from disk
+func (ns *NameService) loadData() {
+	if ns.dataDir == "" {
+		return
+	}
+	
+	path := filepath.Join(ns.dataDir, "names.json")
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	
+	var data NamesData
+	if err := json.NewDecoder(f).Decode(&data); err != nil {
+		return
+	}
+	
+	if data.Names != nil {
+		ns.names = data.Names
+	}
+	if data.ByNodeID != nil {
+		ns.byNodeID = data.ByNodeID
 	}
 }
 

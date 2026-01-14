@@ -242,8 +242,37 @@ func (p *Proxy) handleKykRequest(conn net.Conn, req *http.Request) {
 		host = strings.Split(host, ":")[0]
 	}
 
-	// Special handling for home.kyk - route to built-in homepage
-	if host == "home.kyk" || host == "kayaknet.kyk" {
+	// Special handling for built-in .kyk domains
+	switch host {
+	case "home.kyk", "kayaknet.kyk":
+		p.proxyToHomepage(conn, req)
+		return
+	case "chat.kyk":
+		// Preserve API paths, only rewrite root to /chat
+		if req.URL.Path == "/" || req.URL.Path == "" {
+			req.URL.Path = "/chat"
+		}
+		p.proxyToHomepage(conn, req)
+		return
+	case "market.kyk", "marketplace.kyk":
+		// Preserve API paths, only rewrite root to /marketplace
+		if req.URL.Path == "/" || req.URL.Path == "" {
+			req.URL.Path = "/marketplace"
+		}
+		p.proxyToHomepage(conn, req)
+		return
+	case "domains.kyk":
+		// Preserve API paths, only rewrite root to /domains
+		if req.URL.Path == "/" || req.URL.Path == "" {
+			req.URL.Path = "/domains"
+		}
+		p.proxyToHomepage(conn, req)
+		return
+	case "network.kyk":
+		// Preserve API paths, only rewrite root to /network
+		if req.URL.Path == "/" || req.URL.Path == "" {
+			req.URL.Path = "/network"
+		}
 		p.proxyToHomepage(conn, req)
 		return
 	}

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- KayakNet Terminal Theme -->
+    <color name="background_dark">#0a0a0a</color>
+    <color name="surface_dark">#1a1a1a</color>
+    <color name="surface_elevated">#252525</color>
+    
+    <!-- Neon Colors -->
+    <color name="neon_green">#00ff41</color>
+    <color name="neon_green_dim">#00cc33</color>
+    <color name="neon_cyan">#00d4ff</color>
+    <color name="neon_purple">#bf00ff</color>
+    <color name="neon_yellow">#ffdd00</color>
+    <color name="neon_red">#ff0055</color>
+    <color name="neon_orange">#ff9500</color>
+    
+    <!-- Text Colors -->
+    <color name="text_primary">#e0e0e0</color>
+    <color name="text_secondary">#808080</color>
+    <color name="text_disabled">#4a4a4a</color>
+    
+    <!-- Status Colors -->
+    <color name="status_online">#00ff41</color>
+    <color name="status_offline">#ff0055</color>
+    <color name="status_pending">#ffdd00</color>
+    
+    <!-- Theme Colors -->
+    <color name="colorPrimary">@color/neon_green</color>
+    <color name="colorPrimaryDark">@color/background_dark</color>
+    <color name="colorAccent">@color/neon_cyan</color>
+</resources>
+

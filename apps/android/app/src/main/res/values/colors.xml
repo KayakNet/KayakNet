@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="kayak_green">#00FF00</color>
+    <color name="kayak_green_dim">#00AA00</color>
+    <color name="kayak_green_dark">#004400</color>
+    <color name="kayak_black">#000000</color>
+    <color name="kayak_dark_gray">#0A0A0A</color>
+    <color name="kayak_amber">#FFAA00</color>
+    <color name="kayak_red">#FF4444</color>
+</resources>
+

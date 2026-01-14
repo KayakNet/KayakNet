@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.KayakNet" parent="android:Theme.Material.NoActionBar">
+        <item name="android:colorPrimary">@color/kayak_green</item>
+        <item name="android:colorPrimaryDark">@color/kayak_green_dark</item>
+        <item name="android:colorAccent">@color/kayak_green</item>
+        <item name="android:windowBackground">@color/kayak_black</item>
+        <item name="android:statusBarColor">@color/kayak_black</item>
+        <item name="android:navigationBarColor">@color/kayak_black</item>
+    </style>
+</resources>
+

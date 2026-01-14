@@ -36,12 +36,14 @@ for PLATFORM in "${PLATFORMS[@]}"; do
         -o "$OUTPUT_DIR/$OUTPUT_NAME" ./cmd/kayakd
     
     if [ $? -eq 0 ]; then
-        # Create archive
+        # Create archive (just the binary, no extra files)
         cd $OUTPUT_DIR
         if [ "$GOOS" = "windows" ]; then
-            zip "${OUTPUT_NAME%.exe}.zip" "$OUTPUT_NAME" ../README.md ../LICENSE 2>/dev/null
+            # Create clean zip with just the exe
+            rm -f "${OUTPUT_NAME%.exe}.zip"
+            zip -j "${OUTPUT_NAME%.exe}.zip" "$OUTPUT_NAME"
         else
-            tar czf "${OUTPUT_NAME}.tar.gz" "$OUTPUT_NAME" -C .. README.md LICENSE 2>/dev/null
+            tar czf "${OUTPUT_NAME}.tar.gz" "$OUTPUT_NAME"
         fi
         cd ..
         echo "  [OK] $OUTPUT_NAME"

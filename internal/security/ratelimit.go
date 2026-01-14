@@ -2,6 +2,9 @@
 package security
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -99,6 +102,7 @@ type BanList struct {
 	mu      sync.RWMutex
 	banned  map[string]*BanEntry
 	maxBans int
+	dataDir string
 }
 
 // BanEntry tracks ban information
@@ -207,14 +211,85 @@ func (bl *BanList) cleanup() {
 			}
 		}
 		bl.mu.Unlock()
+		go bl.Save()
 	}
+}
+
+// SetDataDir sets the data directory for persistence
+func (bl *BanList) SetDataDir(dataDir string) {
+	bl.mu.Lock()
+	bl.dataDir = dataDir
+	bl.mu.Unlock()
+	bl.loadData()
+}
+
+// Save persists ban list to disk
+func (bl *BanList) Save() error {
+	if bl.dataDir == "" {
+		return nil
+	}
+
+	bl.mu.RLock()
+	defer bl.mu.RUnlock()
+
+	data := struct {
+		Banned map[string]*BanEntry `json:"banned"`
+	}{
+		Banned: bl.banned,
+	}
+
+	jsonData, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	path := filepath.Join(bl.dataDir, "bans.json")
+	return os.WriteFile(path, jsonData, 0600)
+}
+
+// loadData loads ban list from disk
+func (bl *BanList) loadData() error {
+	if bl.dataDir == "" {
+		return nil
+	}
+
+	path := filepath.Join(bl.dataDir, "bans.json")
+	jsonData, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	var data struct {
+		Banned map[string]*BanEntry `json:"banned"`
+	}
+
+	if err := json.Unmarshal(jsonData, &data); err != nil {
+		return err
+	}
+
+	bl.mu.Lock()
+	defer bl.mu.Unlock()
+
+	// Only load non-expired bans
+	now := time.Now()
+	for id, entry := range data.Banned {
+		if now.Before(entry.ExpiresAt) {
+			bl.banned[id] = entry
+		}
+	}
+
+	return nil
 }
 
 // PeerScorer tracks peer behavior and scores them
 type PeerScorer struct {
-	mu     sync.RWMutex
-	scores map[string]*PeerScore
+	mu      sync.RWMutex
+	scores  map[string]*PeerScore
 	banList *BanList
+	dataDir string
 }
 
 // PeerScore tracks individual peer reputation
@@ -365,6 +440,81 @@ func (ps *PeerScorer) decay() {
 			score.Score *= 0.9
 		}
 		ps.mu.Unlock()
+		go ps.Save()
 	}
+}
+
+// SetDataDir sets the data directory for persistence
+func (ps *PeerScorer) SetDataDir(dataDir string) {
+	ps.mu.Lock()
+	ps.dataDir = dataDir
+	ps.mu.Unlock()
+	ps.loadData()
+}
+
+// Save persists peer scores to disk
+func (ps *PeerScorer) Save() error {
+	if ps.dataDir == "" {
+		return nil
+	}
+
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+
+	data := struct {
+		Scores map[string]*PeerScore `json:"scores"`
+	}{
+		Scores: ps.scores,
+	}
+
+	jsonData, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	path := filepath.Join(ps.dataDir, "peer_scores.json")
+	return os.WriteFile(path, jsonData, 0600)
+}
+
+// loadData loads peer scores from disk
+func (ps *PeerScorer) loadData() error {
+	if ps.dataDir == "" {
+		return nil
+	}
+
+	path := filepath.Join(ps.dataDir, "peer_scores.json")
+	jsonData, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	var data struct {
+		Scores map[string]*PeerScore `json:"scores"`
+	}
+
+	if err := json.Unmarshal(jsonData, &data); err != nil {
+		return err
+	}
+
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	ps.scores = data.Scores
+
+	return nil
+}
+
+// ListScores returns all peer scores
+func (ps *PeerScorer) ListScores() map[string]*PeerScore {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	
+	result := make(map[string]*PeerScore)
+	for k, v := range ps.scores {
+		result[k] = v
+	}
+	return result
 }
 

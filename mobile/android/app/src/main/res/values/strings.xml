@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">KayakNet</string>
+    
+    <!-- Navigation -->
+    <string name="nav_home">Home</string>
+    <string name="nav_chat">Chat</string>
+    <string name="nav_market">Market</string>
+    <string name="nav_domains">Domains</string>
+    <string name="nav_settings">Settings</string>
+    
+    <!-- Status -->
+    <string name="status_connected">CONNECTED</string>
+    <string name="status_offline">OFFLINE</string>
+    <string name="status_connecting">CONNECTING...</string>
+    <string name="status_anonymous">ANONYMOUS</string>
+    <string name="status_building">BUILDING CIRCUITS...</string>
+    
+    <!-- Chat -->
+    <string name="chat_hint">Type a message...</string>
+    <string name="chat_send">Send</string>
+    
+    <!-- Market -->
+    <string name="market_search_hint">Search marketplace...</string>
+    <string name="market_create">Create Listing</string>
+    
+    <!-- Domains -->
+    <string name="domains_search_hint">Search .kyk domains...</string>
+    <string name="domains_register">Register Domain</string>
+    <string name="domains_my">MY DOMAINS</string>
+    
+    <!-- Settings -->
+    <string name="settings_node_info">NODE INFO</string>
+    <string name="settings_copy_id">COPY NODE ID</string>
+    <string name="settings_change_nick">Change Nickname</string>
+    <string name="settings_bootstrap">Change Bootstrap Node</string>
+    <string name="settings_reconnect">Reconnect to Network</string>
+    <string name="settings_escrows">View My Escrows</string>
+    <string name="settings_about">About KayakNet</string>
+    
+    <!-- Actions -->
+    <string name="action_status">Status</string>
+    <string name="action_refresh">Refresh</string>
+    
+    <!-- Errors -->
+    <string name="error_not_connected">Not connected to network</string>
+    <string name="error_send_failed">Failed to send message</string>
+</resources>
+

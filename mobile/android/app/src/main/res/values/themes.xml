@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <style name="Theme.KayakNet" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <!-- Primary brand color -->
+        <item name="colorPrimary">@color/neon_green</item>
+        <item name="colorPrimaryVariant">@color/neon_green_dim</item>
+        <item name="colorOnPrimary">@color/background_dark</item>
+        
+        <!-- Secondary brand color -->
+        <item name="colorSecondary">@color/neon_cyan</item>
+        <item name="colorSecondaryVariant">@color/neon_purple</item>
+        <item name="colorOnSecondary">@color/background_dark</item>
+        
+        <!-- Background -->
+        <item name="android:colorBackground">@color/background_dark</item>
+        <item name="colorSurface">@color/surface_dark</item>
+        <item name="colorOnSurface">@color/text_primary</item>
+        
+        <!-- Status bar -->
+        <item name="android:statusBarColor">@color/background_dark</item>
+        <item name="android:navigationBarColor">@color/surface_dark</item>
+        
+        <!-- Other -->
+        <item name="colorError">@color/neon_red</item>
+        <item name="colorOnError">@color/text_primary</item>
+        
+        <!-- Toolbar -->
+        <item name="toolbarStyle">@style/Widget.KayakNet.Toolbar</item>
+    </style>
+
+    <style name="Widget.KayakNet.Toolbar" parent="Widget.MaterialComponents.Toolbar.Primary">
+        <item name="android:background">@color/surface_dark</item>
+        <item name="titleTextColor">@color/neon_green</item>
+    </style>
+
+</resources>
+

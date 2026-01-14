@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 	"time"
 
@@ -63,6 +64,7 @@ type E2EManager struct {
 	x25519Priv   [32]byte
 	knownKeys    map[string]*PeerKey // nodeID -> their public keys
 	sessionKeys  map[string]*SessionKey // peerID -> derived session key
+	dataDir      string
 }
 
 // PeerKey stores a peer's public keys
@@ -102,8 +104,6 @@ func NewE2EManager(localID string, pubKey ed25519.PublicKey, privKey ed25519.Pri
 // AddPeerKey registers a peer's public key
 func (m *E2EManager) AddPeerKey(nodeID string, pubKey ed25519.PublicKey) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	
 	m.knownKeys[nodeID] = &PeerKey{
 		NodeID:   nodeID,
 		Ed25519:  pubKey,
@@ -111,6 +111,8 @@ func (m *E2EManager) AddPeerKey(nodeID string, pubKey ed25519.PublicKey) {
 		AddedAt:  time.Now(),
 		LastUsed: time.Now(),
 	}
+	m.mu.Unlock()
+	go m.Save()
 }
 
 // GetPeerKey returns a peer's public key
@@ -344,7 +346,15 @@ func (e *EncryptedEnvelope) Marshal() ([]byte, error) {
 func UnmarshalEnvelope(data []byte) (*EncryptedEnvelope, error) {
 	var e EncryptedEnvelope
 	err := json.Unmarshal(data, &e)
-	return &e, err
+	if err != nil {
+		return nil, err
+	}
+	// Validate this is actually an E2E envelope, not a regular message
+	// E2E envelopes must have Version > 0 and Ciphertext
+	if e.Version == 0 || len(e.Ciphertext) == 0 {
+		return nil, errors.New("not an E2E envelope")
+	}
+	return &e, nil
 }
 
 // ToBase64 returns base64 encoded envelope
@@ -662,5 +672,102 @@ func (m *E2EManager) Stats() map[string]interface{} {
 		"session_keys":   len(m.sessionKeys),
 		"local_id":       m.localID[:16] + "...",
 	}
+}
+
+// SetDataDir sets the data directory for persistence
+func (m *E2EManager) SetDataDir(dataDir string) {
+	m.mu.Lock()
+	m.dataDir = dataDir
+	m.mu.Unlock()
+	m.loadData()
+}
+
+// persistedKey is the JSON-serializable version of PeerKey
+type persistedKey struct {
+	NodeID   string `json:"node_id"`
+	Ed25519  []byte `json:"ed25519"`
+	X25519   []byte `json:"x25519"`
+	Verified bool   `json:"verified"`
+	AddedAt  int64  `json:"added_at"`
+	LastUsed int64  `json:"last_used"`
+}
+
+// Save persists known keys to disk
+func (m *E2EManager) Save() error {
+	if m.dataDir == "" {
+		return nil
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	keys := make(map[string]*persistedKey)
+	for id, pk := range m.knownKeys {
+		keys[id] = &persistedKey{
+			NodeID:   pk.NodeID,
+			Ed25519:  pk.Ed25519,
+			X25519:   pk.X25519[:],
+			Verified: pk.Verified,
+			AddedAt:  pk.AddedAt.Unix(),
+			LastUsed: pk.LastUsed.Unix(),
+		}
+	}
+
+	data := struct {
+		KnownKeys map[string]*persistedKey `json:"known_keys"`
+	}{
+		KnownKeys: keys,
+	}
+
+	jsonData, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	path := m.dataDir + "/e2e_keys.json"
+	return os.WriteFile(path, jsonData, 0600)
+}
+
+// loadData loads known keys from disk
+func (m *E2EManager) loadData() error {
+	if m.dataDir == "" {
+		return nil
+	}
+
+	path := m.dataDir + "/e2e_keys.json"
+	jsonData, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	var data struct {
+		KnownKeys map[string]*persistedKey `json:"known_keys"`
+	}
+
+	if err := json.Unmarshal(jsonData, &data); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for id, pk := range data.KnownKeys {
+		var x25519 [32]byte
+		copy(x25519[:], pk.X25519)
+		
+		m.knownKeys[id] = &PeerKey{
+			NodeID:   pk.NodeID,
+			Ed25519:  pk.Ed25519,
+			X25519:   x25519,
+			Verified: pk.Verified,
+			AddedAt:  time.Unix(pk.AddedAt, 0),
+			LastUsed: time.Unix(pk.LastUsed, 0),
+		}
+	}
+
+	return nil
 }
 
