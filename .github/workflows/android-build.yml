@@ -28,23 +28,23 @@ jobs:
     - name: Setup Android SDK
       uses: android-actions/setup-android@v3
     
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v3
+      with:
+        gradle-version: 8.2
+    
     - name: Grant execute permission for gradlew
       run: chmod +x apps/android/gradlew
-      
-    - name: Download Gradle Wrapper
-      run: |
-        cd apps/android
-        gradle wrapper --gradle-version 8.2
       
     - name: Build Debug APK
       run: |
         cd apps/android
-        ./gradlew assembleDebug --no-daemon
+        gradle assembleDebug --no-daemon
         
     - name: Build Release APK
       run: |
         cd apps/android
-        ./gradlew assembleRelease --no-daemon
+        gradle assembleRelease --no-daemon
         
     - name: Upload Debug APK
       uses: actions/upload-artifact@v4
