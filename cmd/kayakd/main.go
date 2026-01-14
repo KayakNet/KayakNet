@@ -178,6 +178,7 @@ func (h *Homepage) Start(port int) error {
 	mux.HandleFunc("/api/reviews", h.handleReviews)
 	mux.HandleFunc("/api/seller", h.handleSeller)
 	mux.HandleFunc("/api/create-listing", h.handleCreateListing)
+	mux.HandleFunc("/api/sync-listing", h.handleSyncListing)
 	mux.HandleFunc("/api/my-listings", h.handleMyListings)
 	mux.HandleFunc("/api/escrow/create", h.handleEscrowCreate)
 	mux.HandleFunc("/api/escrow/status", h.handleEscrowStatus)
@@ -191,6 +192,17 @@ func (h *Homepage) Start(port int) error {
 	mux.HandleFunc("/api/chat/profile", h.handleChatProfile)
 	mux.HandleFunc("/api/chat/conversations", h.handleChatConversations)
 	mux.HandleFunc("/api/chat/dm", h.handleChatDM)
+	mux.HandleFunc("/api/chat/dm/read", h.handleDMRead)
+	mux.HandleFunc("/api/chat/dm/typing", h.handleDMTyping)
+	mux.HandleFunc("/api/chat/dm/pin", h.handleDMPin)
+	mux.HandleFunc("/api/chat/dm/mute", h.handleDMMute)
+	mux.HandleFunc("/api/chat/dm/archive", h.handleDMArchive)
+	mux.HandleFunc("/api/chat/dm/delete", h.handleDMDelete)
+	mux.HandleFunc("/api/chat/dm/search", h.handleDMSearch)
+	mux.HandleFunc("/api/chat/dm/draft", h.handleDMDraft)
+	mux.HandleFunc("/api/chat/dm/nickname", h.handleDMNickname)
+	mux.HandleFunc("/api/chat/dm/clear", h.handleDMClear)
+	mux.HandleFunc("/api/chat/dm/unread", h.handleDMUnread)
 	mux.HandleFunc("/api/chat/users", h.handleChatUsers)
 	mux.HandleFunc("/api/chat/user", h.handleChatUser)
 	mux.HandleFunc("/api/chat/search", h.handleChatSearch)
@@ -1616,6 +1628,206 @@ func (n *Node) bootstrap() {
 		time.Sleep(500 * time.Millisecond)
 		target, _ := json.Marshal(n.identity.PublicKey()[:20])
 		n.sendDirect(addr, MsgTypeFindNode, target)
+
+		// Sync data from bootstrap HTTP API
+		go n.syncFromBootstrap(addrStr)
+	}
+}
+
+// syncFromBootstrap fetches and syncs data from bootstrap node
+func (n *Node) syncFromBootstrap(addrStr string) {
+	// Extract host from address (remove port, add HTTP port)
+	host := strings.Split(addrStr, ":")[0]
+	baseURL := fmt.Sprintf("http://%s:8080", host)
+
+	log.Printf("[SYNC] Syncing data from bootstrap %s", baseURL)
+
+	// Sync all data
+	n.syncListingsFromURL(baseURL + "/api/listings")
+	n.syncDomainsFromURL(baseURL + "/api/domains")
+	n.syncChatFromURL(baseURL)
+
+	// Start periodic sync
+	go n.periodicSync(baseURL)
+}
+
+func (n *Node) syncListingsFromURL(url string) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		log.Printf("[SYNC] Failed to fetch listings: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	var listings []struct {
+		ID          string  `json:"id"`
+		Title       string  `json:"title"`
+		Description string  `json:"description"`
+		Price       float64 `json:"price"`
+		Currency    string  `json:"currency"`
+		Category    string  `json:"category"`
+		Image       string  `json:"image"`
+		SellerID    string  `json:"seller_id"`
+		SellerName  string  `json:"seller_name"`
+		CreatedAt   string  `json:"created_at"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&listings); err != nil {
+		log.Printf("[SYNC] Failed to decode listings: %v", err)
+		return
+	}
+
+	imported := 0
+	for _, l := range listings {
+		existing, _ := n.marketplace.GetListing(l.ID)
+		if existing == nil {
+			createdAt, _ := time.Parse(time.RFC3339, l.CreatedAt)
+			if createdAt.IsZero() {
+				createdAt = time.Now()
+			}
+			newListing := &market.Listing{
+				ID:          l.ID,
+				Title:       l.Title,
+				Description: l.Description,
+				Price:       l.Price,
+				Currency:    l.Currency,
+				Category:    l.Category,
+				Image:       l.Image,
+				SellerID:    l.SellerID,
+				SellerName:  l.SellerName,
+				CreatedAt:   createdAt,
+				ExpiresAt:   createdAt.Add(30 * 24 * time.Hour),
+				Active:      true,
+			}
+			n.marketplace.ImportListing(newListing)
+			imported++
+		}
+	}
+	if imported > 0 {
+		log.Printf("[SYNC] Imported %d listings from bootstrap", imported)
+	}
+}
+
+func (n *Node) syncDomainsFromURL(url string) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	var domains []struct {
+		Name        string `json:"name"`
+		FullName    string `json:"full_name"`
+		Description string `json:"description"`
+		Owner       string `json:"owner"`
+		ServiceType string `json:"service_type"`
+		CreatedAt   string `json:"created_at"`
+		ExpiresAt   string `json:"expires_at"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&domains); err != nil {
+		return
+	}
+
+	imported := 0
+	for _, d := range domains {
+		existing, _ := n.nameService.Resolve(d.Name)
+		if existing == nil {
+			createdAt, _ := time.Parse(time.RFC3339, d.CreatedAt)
+			expiresAt, _ := time.Parse(time.RFC3339, d.ExpiresAt)
+			if createdAt.IsZero() {
+				createdAt = time.Now()
+			}
+			if expiresAt.IsZero() {
+				expiresAt = createdAt.Add(365 * 24 * time.Hour)
+			}
+			n.nameService.ImportDomain(d.Name, d.Description, d.Owner, d.ServiceType, createdAt, expiresAt)
+			imported++
+		}
+	}
+	if imported > 0 {
+		log.Printf("[SYNC] Imported %d domains from bootstrap", imported)
+	}
+}
+
+func (n *Node) syncChatFromURL(baseURL string) {
+	// First get all rooms from bootstrap
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(baseURL + "/api/chat/rooms")
+	if err != nil {
+		// Fallback to default rooms
+		for _, room := range []string{"general", "market", "help", "random", "tech", "privacy"} {
+			n.syncChatRoom(baseURL, room)
+		}
+		return
+	}
+	defer resp.Body.Close()
+
+	var rooms []struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rooms); err != nil {
+		return
+	}
+
+	// Sync all rooms
+	for _, room := range rooms {
+		n.syncChatRoom(baseURL, room.Name)
+	}
+}
+
+func (n *Node) syncChatRoom(baseURL, room string) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("%s/api/chat?room=%s", baseURL, room))
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	var messages []struct {
+		ID        string `json:"id"`
+		Room      string `json:"room"`
+		SenderID  string `json:"sender_id"`
+		Nick      string `json:"nick"`
+		Content   string `json:"content"`
+		Timestamp string `json:"timestamp"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&messages); err != nil {
+		return
+	}
+
+	imported := 0
+	for _, m := range messages {
+		ts, _ := time.Parse(time.RFC3339, m.Timestamp)
+		if ts.IsZero() {
+			ts = time.Now()
+		}
+		if n.chatMgr.ImportMessage(m.ID, room, m.SenderID, m.Nick, m.Content, ts) {
+			imported++
+		}
+	}
+	if imported > 0 {
+		log.Printf("[SYNC] Imported %d chat messages from bootstrap (room: %s)", imported, room)
+	}
+}
+
+func (n *Node) periodicSync(baseURL string) {
+	// Sync every 10 seconds for faster message propagation
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-n.ctx.Done():
+			return
+		case <-ticker.C:
+			n.syncListingsFromURL(baseURL + "/api/listings")
+			n.syncDomainsFromURL(baseURL + "/api/domains")
+			n.syncChatFromURL(baseURL)
+		}
 	}
 }
 
@@ -2519,6 +2731,76 @@ func (h *Homepage) handleCreateListing(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *Homepage) handleSyncListing(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.node == nil {
+		http.Error(w, "Node not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	var listing struct {
+		ID          string  `json:"id"`
+		Title       string  `json:"title"`
+		Description string  `json:"description"`
+		Price       float64 `json:"price"`
+		Currency    string  `json:"currency"`
+		Category    string  `json:"category"`
+		Image       string  `json:"image"`
+		SellerID    string  `json:"seller_id"`
+		SellerName  string  `json:"seller_name"`
+		CreatedAt   string  `json:"created_at"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&listing); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if listing.ID == "" || listing.Title == "" {
+		http.Error(w, "ID and title required", http.StatusBadRequest)
+		return
+	}
+
+	// Check if listing already exists
+	existing, _ := h.node.marketplace.GetListing(listing.ID)
+	if existing != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"status": "exists"})
+		return
+	}
+
+	// Parse created time
+	createdAt, _ := time.Parse(time.RFC3339, listing.CreatedAt)
+	if createdAt.IsZero() {
+		createdAt = time.Now()
+	}
+
+	// Import the listing
+	newListing := &market.Listing{
+		ID:          listing.ID,
+		Title:       listing.Title,
+		Description: listing.Description,
+		Price:       listing.Price,
+		Currency:    listing.Currency,
+		Category:    listing.Category,
+		Image:       listing.Image,
+		SellerID:    listing.SellerID,
+		SellerName:  listing.SellerName,
+		CreatedAt:   createdAt,
+		ExpiresAt:   createdAt.Add(30 * 24 * time.Hour),
+		Active:      true,
+	}
+
+	h.node.marketplace.ImportListing(newListing)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "imported", "id": listing.ID})
+}
+
 func (h *Homepage) handleMyListings(w http.ResponseWriter, r *http.Request) {
 	var listings []map[string]interface{}
 
@@ -3063,6 +3345,252 @@ func (h *Homepage) handleChatDM(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(messages)
+}
+
+// handleDMRead marks a DM conversation as read
+func (h *Homepage) handleDMRead(w http.ResponseWriter, r *http.Request) {
+	if h.node == nil {
+		http.Error(w, "Node not available", http.StatusServiceUnavailable)
+		return
+	}
+	userID := r.URL.Query().Get("user")
+	if userID == "" {
+		userID = r.FormValue("user")
+	}
+	if userID != "" {
+		h.node.chatMgr.MarkDMAsRead(userID)
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleDMTyping handles typing indicators for DMs
+func (h *Homepage) handleDMTyping(w http.ResponseWriter, r *http.Request) {
+	if h.node == nil {
+		http.Error(w, "Node not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	userID := r.URL.Query().Get("user")
+	if userID == "" {
+		userID = r.FormValue("user")
+	}
+
+	if r.Method == "POST" {
+		typing := r.FormValue("typing") == "true"
+		h.node.chatMgr.SetDMTyping(userID, typing)
+
+		// Broadcast typing indicator to the other user
+		if typing {
+			payload, _ := json.Marshal(map[string]interface{}{
+				"type":   "dm_typing",
+				"from":   h.node.identity.NodeID(),
+				"to":     userID,
+				"typing": true,
+			})
+			h.node.broadcastGossip(MsgTypeChat, payload)
+		}
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// GET - return who's typing
+	typing := h.node.chatMgr.GetDMTypingUsers(userID)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"typing": typing,
+	})
+}
+
+// handleDMPin pins/unpins a DM conversation
+func (h *Homepage) handleDMPin(w http.ResponseWriter, r *http.Request) {
+	if h.node == nil {
+		http.Error(w, "Node not available", http.StatusServiceUnavailable)
+		return
+	}
+	userID := r.FormValue("user")
+	pinned := r.FormValue("pinned") == "true"
+	if userID != "" {
+		h.node.chatMgr.PinConversation(userID, pinned)
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleDMMute mutes/unmutes a DM conversation
+func (h *Homepage) handleDMMute(w http.ResponseWriter, r *http.Request) {
+	if h.node == nil {
+		http.Error(w, "Node not available", http.StatusServiceUnavailable)
+		return
+	}
+	userID := r.FormValue("user")
+	muted := r.FormValue("muted") == "true"
+	if userID != "" {
+		h.node.chatMgr.MuteConversation(userID, muted)
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleDMArchive archives/unarchives a DM conversation
+func (h *Homepage) handleDMArchive(w http.ResponseWriter, r *http.Request) {
+	if h.node == nil {
+		http.Error(w, "Node not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	if r.Method == "GET" {
+		// Return archived conversations
+		archived := h.node.chatMgr.GetArchivedConversations()
+		var convs []map[string]interface{}
+		for _, c := range archived {
+			otherUser := c.Participants[0]
+			if otherUser == h.node.identity.NodeID() && len(c.Participants) > 1 {
+				otherUser = c.Participants[1]
+			}
+			convs = append(convs, map[string]interface{}{
+				"id":           c.ID,
+				"user":         otherUser,
+				"last_message": c.LastMessage.Format(time.RFC3339),
+				"unread":       c.Unread,
+			})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(convs)
+		return
+	}
+
+	userID := r.FormValue("user")
+	archived := r.FormValue("archived") == "true"
+	if userID != "" {
+		h.node.chatMgr.ArchiveConversation(userID, archived)
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleDMDelete deletes a message or entire conversation
+func (h *Homepage) handleDMDelete(w http.ResponseWriter, r *http.Request) {
+	if h.node == nil {
+		http.Error(w, "Node not available", http.StatusServiceUnavailable)
+		return
+	}
+	userID := r.FormValue("user")
+	messageID := r.FormValue("message_id")
+	deleteAll := r.FormValue("all") == "true"
+
+	if userID == "" {
+		http.Error(w, "user required", http.StatusBadRequest)
+		return
+	}
+
+	if deleteAll {
+		h.node.chatMgr.DeleteConversation(userID)
+	} else if messageID != "" {
+		err := h.node.chatMgr.DeleteDMMessage(userID, messageID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleDMSearch searches messages in a DM conversation
+func (h *Homepage) handleDMSearch(w http.ResponseWriter, r *http.Request) {
+	if h.node == nil {
+		http.Error(w, "Node not available", http.StatusServiceUnavailable)
+		return
+	}
+	userID := r.URL.Query().Get("user")
+	query := r.URL.Query().Get("q")
+
+	if userID == "" || query == "" {
+		http.Error(w, "user and q required", http.StatusBadRequest)
+		return
+	}
+
+	results := h.node.chatMgr.SearchDMMessages(userID, query)
+	var messages []map[string]interface{}
+	for _, m := range results {
+		messages = append(messages, map[string]interface{}{
+			"id":        m.ID,
+			"sender_id": m.SenderID,
+			"nick":      m.Nick,
+			"content":   m.Content,
+			"timestamp": m.Timestamp.Format(time.RFC3339),
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(messages)
+}
+
+// handleDMDraft saves/retrieves draft messages
+func (h *Homepage) handleDMDraft(w http.ResponseWriter, r *http.Request) {
+	if h.node == nil {
+		http.Error(w, "Node not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	userID := r.URL.Query().Get("user")
+	if userID == "" {
+		userID = r.FormValue("user")
+	}
+
+	if r.Method == "POST" {
+		draft := r.FormValue("draft")
+		h.node.chatMgr.SetDMDraft(userID, draft)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	draft := h.node.chatMgr.GetDMDraft(userID)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"draft": draft})
+}
+
+// handleDMNickname sets/gets custom nicknames
+func (h *Homepage) handleDMNickname(w http.ResponseWriter, r *http.Request) {
+	if h.node == nil {
+		http.Error(w, "Node not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	userID := r.URL.Query().Get("user")
+	if userID == "" {
+		userID = r.FormValue("user")
+	}
+
+	if r.Method == "POST" {
+		nickname := r.FormValue("nickname")
+		h.node.chatMgr.SetDMNickname(userID, nickname)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	nickname := h.node.chatMgr.GetDMNickname(userID)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"nickname": nickname})
+}
+
+// handleDMClear clears all messages in a conversation
+func (h *Homepage) handleDMClear(w http.ResponseWriter, r *http.Request) {
+	if h.node == nil {
+		http.Error(w, "Node not available", http.StatusServiceUnavailable)
+		return
+	}
+	userID := r.FormValue("user")
+	if userID != "" {
+		h.node.chatMgr.ClearDMHistory(userID)
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleDMUnread returns total unread DM count
+func (h *Homepage) handleDMUnread(w http.ResponseWriter, r *http.Request) {
+	if h.node == nil {
+		http.Error(w, "Node not available", http.StatusServiceUnavailable)
+		return
+	}
+	count := h.node.chatMgr.GetTotalUnreadDMs()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]int{"unread": count})
 }
 
 func (h *Homepage) handleChatUsers(w http.ResponseWriter, r *http.Request) {
@@ -4862,7 +5390,7 @@ const chatPageHTML = `<!DOCTYPE html>
                             <div class="panel-body" id="rooms-list"></div>
                         </div>
                         <div class="panel">
-                            <div class="panel-header"><span>DIRECT MESSAGES</span></div>
+                            <div class="panel-header"><span>DIRECT MESSAGES</span><span id="dm-header-badge"></span></div>
                             <div class="panel-body" id="dm-list"></div>
                         </div>
                         <div class="panel">
@@ -4987,19 +5515,169 @@ const chatPageHTML = `<!DOCTYPE html>
                 const res = await fetch('/api/chat/conversations');
                 const convs = await res.json();
                 const container = document.getElementById('dm-list');
+                
+                // Also get total unread count
+                const unreadRes = await fetch('/api/chat/dm/unread');
+                const unreadData = await unreadRes.json();
+                const dmHeader = document.getElementById('dm-header-badge');
+                if (dmHeader && unreadData.unread > 0) {
+                    dmHeader.innerHTML = ' <span class="unread">' + unreadData.unread + '</span>';
+                } else if (dmHeader) {
+                    dmHeader.innerHTML = '';
+                }
+                
                 if (!convs || convs.length === 0) {
                     container.innerHTML = '<div style="padding:5px;color:var(--green-dim);font-size:12px;">No conversations</div>';
                     return;
                 }
                 container.innerHTML = convs.map(c => {
                     const otherUser = c.participants.find(p => p !== myProfile?.id) || c.participants[0];
-                    return '<div class="dm-item' + (currentDM === otherUser ? ' active' : '') + '" onclick="selectDM(\'' + otherUser + '\')">' +
+                    const isPinned = c.pinned ? '<span style="color:var(--green);margin-right:3px;">*</span>' : '';
+                    const isMuted = c.muted ? '<span style="color:var(--green-dim);margin-right:3px;">M</span>' : '';
+                    const draft = c.draft ? '<span style="color:var(--red);font-size:10px;"> [draft]</span>' : '';
+                    return '<div class="dm-item' + (currentDM === otherUser ? ' active' : '') + (c.pinned ? ' pinned' : '') + '" ' +
+                        'onclick="selectDM(\'' + otherUser + '\')" ' +
+                        'oncontextmenu="showDMContextMenu(event, \'' + otherUser + '\', ' + (c.pinned||false) + ', ' + (c.muted||false) + ')">' +
+                        isPinned + isMuted +
                         '<div class="status-dot status-online"></div>' +
                         '<span>' + escapeHtml(otherUser.substring(0,12)) + '</span>' +
+                        draft +
                         (c.unread > 0 ? '<span class="unread">' + c.unread + '</span>' : '') +
                         '</div>';
                 }).join('');
             } catch(e) { console.error('Failed to load DMs:', e); }
+        }
+        
+        // DM context menu
+        function showDMContextMenu(e, userId, isPinned, isMuted) {
+            e.preventDefault();
+            const menu = document.getElementById('dm-context-menu');
+            menu.innerHTML = 
+                '<div class="ctx-item" onclick="togglePinDM(\'' + userId + '\', ' + !isPinned + ')">' + (isPinned ? 'Unpin' : 'Pin') + ' Conversation</div>' +
+                '<div class="ctx-item" onclick="toggleMuteDM(\'' + userId + '\', ' + !isMuted + ')">' + (isMuted ? 'Unmute' : 'Mute') + ' Notifications</div>' +
+                '<div class="ctx-item" onclick="searchDM(\'' + userId + '\')">Search Messages</div>' +
+                '<div class="ctx-item" onclick="archiveDM(\'' + userId + '\')">Archive</div>' +
+                '<div class="ctx-item" onclick="setNickname(\'' + userId + '\')">Set Nickname</div>' +
+                '<div class="ctx-item" style="color:var(--red);" onclick="clearDM(\'' + userId + '\')">Clear History</div>' +
+                '<div class="ctx-item" style="color:var(--red);" onclick="deleteDM(\'' + userId + '\')">Delete Conversation</div>';
+            menu.style.display = 'block';
+            menu.style.left = e.pageX + 'px';
+            menu.style.top = e.pageY + 'px';
+        }
+        
+        async function togglePinDM(userId, pin) {
+            await fetch('/api/chat/dm/pin', {method: 'POST', body: new URLSearchParams({user: userId, pinned: pin})});
+            hideDMContextMenu();
+            loadDMs();
+        }
+        
+        async function toggleMuteDM(userId, mute) {
+            await fetch('/api/chat/dm/mute', {method: 'POST', body: new URLSearchParams({user: userId, muted: mute})});
+            hideDMContextMenu();
+            loadDMs();
+        }
+        
+        async function searchDM(userId) {
+            hideDMContextMenu();
+            const query = prompt('Search messages:');
+            if (!query) return;
+            const res = await fetch('/api/chat/dm/search?user=' + userId + '&q=' + encodeURIComponent(query));
+            const results = await res.json();
+            if (!results || results.length === 0) {
+                alert('No messages found');
+                return;
+            }
+            selectDM(userId);
+            setTimeout(() => {
+                const msgId = results[0].id;
+                const el = document.getElementById('msg-' + msgId);
+                if (el) {
+                    el.scrollIntoView({behavior: 'smooth', block: 'center'});
+                    el.style.background = 'rgba(0,255,0,0.1)';
+                    setTimeout(() => el.style.background = '', 2000);
+                }
+            }, 500);
+        }
+        
+        async function archiveDM(userId) {
+            if (!confirm('Archive this conversation?')) return;
+            await fetch('/api/chat/dm/archive', {method: 'POST', body: new URLSearchParams({user: userId, archived: 'true'})});
+            hideDMContextMenu();
+            loadDMs();
+        }
+        
+        async function setNickname(userId) {
+            const nickname = prompt('Set nickname for this user:');
+            if (nickname === null) return;
+            await fetch('/api/chat/dm/nickname', {method: 'POST', body: new URLSearchParams({user: userId, nickname: nickname})});
+            hideDMContextMenu();
+            loadDMs();
+        }
+        
+        async function clearDM(userId) {
+            if (!confirm('Clear all messages in this conversation?')) return;
+            await fetch('/api/chat/dm/clear', {method: 'POST', body: new URLSearchParams({user: userId})});
+            hideDMContextMenu();
+            loadMessages();
+        }
+        
+        async function deleteDM(userId) {
+            if (!confirm('Delete this entire conversation?')) return;
+            await fetch('/api/chat/dm/delete', {method: 'POST', body: new URLSearchParams({user: userId, all: 'true'})});
+            hideDMContextMenu();
+            if (currentDM === userId) {
+                currentDM = null;
+                document.getElementById('messages').innerHTML = '';
+            }
+            loadDMs();
+        }
+        
+        function hideDMContextMenu() {
+            document.getElementById('dm-context-menu').style.display = 'none';
+        }
+        
+        // Typing indicator for DMs
+        let typingTimeout = null;
+        function handleDMTyping() {
+            if (!currentDM) return;
+            fetch('/api/chat/dm/typing', {method: 'POST', body: new URLSearchParams({user: currentDM, typing: 'true'})});
+            if (typingTimeout) clearTimeout(typingTimeout);
+            typingTimeout = setTimeout(() => {
+                fetch('/api/chat/dm/typing', {method: 'POST', body: new URLSearchParams({user: currentDM, typing: 'false'})});
+            }, 3000);
+        }
+        
+        // Check typing status
+        async function checkDMTyping() {
+            if (!currentDM) return;
+            const res = await fetch('/api/chat/dm/typing?user=' + currentDM);
+            const data = await res.json();
+            const indicator = document.getElementById('typing-indicator');
+            if (data.typing && data.typing.length > 0) {
+                indicator.textContent = data.typing[0].substring(0,8) + '... is typing';
+                indicator.style.display = 'block';
+            } else {
+                indicator.style.display = 'none';
+            }
+        }
+        
+        // Save draft when leaving DM
+        async function saveDMDraft() {
+            if (!currentDM) return;
+            const input = document.getElementById('msg-input');
+            if (input.value.trim()) {
+                await fetch('/api/chat/dm/draft', {method: 'POST', body: new URLSearchParams({user: currentDM, draft: input.value})});
+            }
+        }
+        
+        // Load draft when entering DM
+        async function loadDMDraft() {
+            if (!currentDM) return;
+            const res = await fetch('/api/chat/dm/draft?user=' + currentDM);
+            const data = await res.json();
+            if (data.draft) {
+                document.getElementById('msg-input').value = data.draft;
+            }
         }
         
         async function loadMessages() {
@@ -5167,13 +5845,53 @@ const chatPageHTML = `<!DOCTYPE html>
             loadOnlineUsers();
         }
         
-        function selectDM(userId) {
+        async function selectDM(userId) {
+            // Save draft from previous DM
+            await saveDMDraft();
+            
             currentDM = userId;
             currentRoom = null;
             document.querySelectorAll('.room-item, .dm-item').forEach(el => el.classList.remove('active'));
             document.querySelector('.dm-item[onclick*="' + userId + '"]')?.classList.add('active');
             document.getElementById('chat-title').textContent = 'DM: ' + userId.substring(0,12);
+            document.getElementById('chat-title').innerHTML += ' <span style="font-size:10px;cursor:pointer;" onclick="showDMOptions(\'' + userId + '\')">[...]</span>';
+            
+            // Mark as read
+            fetch('/api/chat/dm/read?user=' + userId);
+            
+            // Load draft
+            await loadDMDraft();
+            
             loadMessages();
+            loadDMs(); // Refresh to update unread counts
+            
+            // Start typing indicator polling
+            if (window.dmTypingInterval) clearInterval(window.dmTypingInterval);
+            window.dmTypingInterval = setInterval(checkDMTyping, 2000);
+        }
+        
+        function showDMOptions(userId) {
+            const menu = document.getElementById('dm-context-menu');
+            menu.innerHTML = 
+                '<div class="ctx-item" onclick="searchDM(\'' + userId + '\')">Search Messages</div>' +
+                '<div class="ctx-item" onclick="viewProfile(\'' + userId + '\')">View Profile</div>' +
+                '<div class="ctx-item" onclick="setNickname(\'' + userId + '\')">Set Nickname</div>' +
+                '<div class="ctx-item" style="color:var(--red);" onclick="blockUserFromDM(\'' + userId + '\')">Block User</div>';
+            menu.style.display = 'block';
+            menu.style.left = '50%';
+            menu.style.top = '60px';
+        }
+        
+        async function viewProfile(userId) {
+            hideDMContextMenu();
+            showProfile(userId);
+        }
+        
+        async function blockUserFromDM(userId) {
+            if (!confirm('Block this user? They will not be able to message you.')) return;
+            await fetch('/api/chat/block', {method: 'POST', body: new URLSearchParams({user: userId})});
+            hideDMContextMenu();
+            alert('User blocked');
         }
         
         async function sendMessage() {
@@ -5217,9 +5935,10 @@ const chatPageHTML = `<!DOCTYPE html>
         }
         
         function handleTyping() {
-            // Could send typing indicator to server
-            clearTimeout(typingTimeout);
-            typingTimeout = setTimeout(() => {}, 3000);
+            // Send typing indicator for DMs
+            if (currentDM) {
+                handleDMTyping();
+            }
         }
         
         function handleFileSelect(e) {
@@ -5396,7 +6115,25 @@ const chatPageHTML = `<!DOCTYPE html>
         
         // Start
         init();
+        
+        // Close context menu on click outside
+        document.addEventListener('click', function(e) {
+            if (!e.target.closest('#dm-context-menu') && !e.target.closest('.dm-item')) {
+                hideDMContextMenu();
+            }
+        });
     </script>
+    
+    <!-- DM Context Menu -->
+    <div id="dm-context-menu" style="display:none;position:fixed;background:var(--bg);border:1px solid var(--border);z-index:1000;min-width:150px;box-shadow:0 2px 10px rgba(0,0,0,0.5);">
+    </div>
+    
+    <style>
+        .ctx-item { padding: 8px 12px; cursor: pointer; font-size: 12px; color: var(--green); }
+        .ctx-item:hover { background: var(--border); }
+        .dm-item.pinned { border-left: 2px solid var(--green); }
+        .dm-item .unread { background: var(--red); color: var(--bg); padding: 1px 4px; border-radius: 8px; font-size: 10px; margin-left: auto; }
+    </style>
 </body>
 </html>`
 

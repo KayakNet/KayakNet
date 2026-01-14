@@ -111,12 +111,24 @@ type Room struct {
 	Pinned      []string  `json:"pinned"` // Pinned message IDs
 	Icon        string    `json:"icon"`   // Room icon emoji or image
 
-	// Runtime
-	messages     []*Message
-	onlineUsers  map[string]time.Time // userID -> last activity
-	typingUsers  map[string]time.Time // userID -> typing started
-	mu           sync.RWMutex
+	// Messages - now persisted
+	Messages []*Message `json:"messages,omitempty"`
+
+	// Runtime (not persisted)
+	messages     []*Message           `json:"-"`
+	onlineUsers  map[string]time.Time `json:"-"` // userID -> last activity
+	typingUsers  map[string]time.Time `json:"-"` // userID -> typing started
+	mu           sync.RWMutex         `json:"-"`
 }
+
+// MessageStatus represents delivery/read status
+type MessageStatus int
+
+const (
+	StatusSent MessageStatus = iota
+	StatusDelivered
+	StatusRead
+)
 
 // DirectConversation represents a DM thread between two users
 type DirectConversation struct {
@@ -126,7 +138,29 @@ type DirectConversation struct {
 	LastMessage  time.Time  `json:"last_message"`
 	Messages     []*Message `json:"messages"`
 	Unread       int        `json:"unread"`
-	mu           sync.RWMutex
+	
+	// Enhanced DM features
+	Pinned        bool              `json:"pinned"`         // Pin conversation to top
+	Muted         bool              `json:"muted"`          // Mute notifications
+	Archived      bool              `json:"archived"`       // Archive conversation
+	LastRead      map[string]string `json:"last_read"`      // userID -> last read messageID
+	TypingUsers   map[string]int64  `json:"typing_users"`   // userID -> timestamp
+	Draft         string            `json:"draft"`          // Unsent draft message
+	Nickname      map[string]string `json:"nickname"`       // Custom nicknames for participants
+	
+	mu           sync.RWMutex `json:"-"`
+}
+
+// DMMessage extends Message with DM-specific fields
+type DMMessage struct {
+	*Message
+	Status      MessageStatus `json:"status"`       // sent/delivered/read
+	DeliveredAt int64         `json:"delivered_at"` // When delivered
+	ReadAt      int64         `json:"read_at"`      // When read
+	ReplyToID   string        `json:"reply_to_id"`  // Reply to message
+	ReplyPreview string       `json:"reply_preview"` // Preview of replied message
+	Deleted     bool          `json:"deleted"`      // Soft delete
+	DeletedAt   int64         `json:"deleted_at"`   // When deleted
 }
 
 // ChatManager manages chat rooms, users, and messages
@@ -215,8 +249,30 @@ func (cm *ChatManager) Save() error {
 	}
 	
 	cm.mu.RLock()
+	
+	// Copy messages from runtime to exportable field before saving
+	roomsCopy := make(map[string]*Room)
+	for name, room := range cm.rooms {
+		room.mu.RLock()
+		roomCopy := &Room{
+			Name:        room.Name,
+			Description: room.Description,
+			Topic:       room.Topic,
+			CreatedAt:   room.CreatedAt,
+			CreatorID:   room.CreatorID,
+			Private:     room.Private,
+			Members:     room.Members,
+			Moderators:  room.Moderators,
+			Pinned:      room.Pinned,
+			Icon:        room.Icon,
+			Messages:    room.messages, // Copy runtime messages to exportable field
+		}
+		room.mu.RUnlock()
+		roomsCopy[name] = roomCopy
+	}
+	
 	data := ChatData{
-		Rooms:         cm.rooms,
+		Rooms:         roomsCopy,
 		Users:         cm.users,
 		Conversations: cm.conversations,
 		LocalNick:     cm.localNick,
@@ -266,7 +322,23 @@ func (cm *ChatManager) loadData() {
 	}
 	
 	if data.Rooms != nil {
-		cm.rooms = data.Rooms
+		// Restore rooms and copy messages from exported field to runtime field
+		for name, room := range data.Rooms {
+			// Initialize runtime fields
+			room.onlineUsers = make(map[string]time.Time)
+			room.typingUsers = make(map[string]time.Time)
+			
+			// Copy Messages (exported) to messages (runtime)
+			// This handles both old format (messages field) and new format (Messages field)
+			if room.Messages != nil && len(room.Messages) > 0 {
+				room.messages = room.Messages
+			}
+			if room.messages == nil {
+				room.messages = make([]*Message, 0)
+			}
+			
+			cm.rooms[name] = room
+		}
 	}
 	if data.Users != nil {
 		cm.users = data.Users
@@ -277,6 +349,64 @@ func (cm *ChatManager) loadData() {
 	if data.LocalNick != "" {
 		cm.localNick = data.LocalNick
 	}
+}
+
+// ImportMessage imports a message from another node (for sync)
+// Returns true if the message was new and imported
+func (cm *ChatManager) ImportMessage(id, roomName, userID, username, content string, timestamp time.Time) bool {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	
+	room, exists := cm.rooms[roomName]
+	if !exists {
+		// Create room if it doesn't exist
+		room = &Room{
+			Name:        roomName,
+			Description: "Synced room",
+			CreatedAt:   time.Now(),
+			onlineUsers: make(map[string]time.Time),
+			typingUsers: make(map[string]time.Time),
+		}
+		cm.rooms[roomName] = room
+	}
+	
+	// Check if message already exists
+	room.mu.Lock()
+	defer room.mu.Unlock()
+	
+	for _, msg := range room.messages {
+		if msg.ID == id {
+			return false // Already exists
+		}
+	}
+	
+	// Create and add message
+	msg := &Message{
+		ID:        id,
+		Type:      MsgTypeText,
+		Room:      roomName,
+		SenderID:  userID,
+		Nick:      username,
+		Content:   content,
+		Timestamp: timestamp,
+	}
+	
+	room.messages = append(room.messages, msg)
+	
+	// Sort by timestamp
+	sort.Slice(room.messages, func(i, j int) bool {
+		return room.messages[i].Timestamp.Before(room.messages[j].Timestamp)
+	})
+	
+	// Trim old messages
+	if len(room.messages) > MaxMessagesPerRoom {
+		room.messages = room.messages[len(room.messages)-MaxMessagesPerRoom:]
+	}
+	
+	// Save after import
+	go cm.Save()
+	
+	return true
 }
 
 // SetNick sets the local nickname
@@ -762,15 +892,389 @@ func (cm *ChatManager) GetConversations() []*DirectConversation {
 
 	convs := make([]*DirectConversation, 0, len(cm.conversations))
 	for _, conv := range cm.conversations {
-		convs = append(convs, conv)
+		if !conv.Archived {
+			convs = append(convs, conv)
+		}
 	}
 
-	// Sort by last message time
+	// Sort: pinned first, then by last message time
+	sort.Slice(convs, func(i, j int) bool {
+		if convs[i].Pinned != convs[j].Pinned {
+			return convs[i].Pinned
+		}
+		return convs[i].LastMessage.After(convs[j].LastMessage)
+	})
+
+	return convs
+}
+
+// GetConversation returns a specific conversation
+func (cm *ChatManager) GetConversation(userID string) *DirectConversation {
+	convID := cm.getConversationID(cm.localID, userID)
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return cm.conversations[convID]
+}
+
+// MarkDMAsRead marks all messages in a DM as read
+func (cm *ChatManager) MarkDMAsRead(userID string) {
+	convID := cm.getConversationID(cm.localID, userID)
+	cm.mu.Lock()
+	conv, exists := cm.conversations[convID]
+	cm.mu.Unlock()
+	
+	if !exists {
+		return
+	}
+	
+	conv.mu.Lock()
+	conv.Unread = 0
+	if conv.LastRead == nil {
+		conv.LastRead = make(map[string]string)
+	}
+	if len(conv.Messages) > 0 {
+		conv.LastRead[cm.localID] = conv.Messages[len(conv.Messages)-1].ID
+	}
+	conv.mu.Unlock()
+	
+	go cm.Save()
+}
+
+// SetDMTyping sets typing indicator for a conversation
+func (cm *ChatManager) SetDMTyping(userID string, isTyping bool) {
+	convID := cm.getConversationID(cm.localID, userID)
+	cm.mu.Lock()
+	conv, exists := cm.conversations[convID]
+	cm.mu.Unlock()
+	
+	if !exists {
+		return
+	}
+	
+	conv.mu.Lock()
+	if conv.TypingUsers == nil {
+		conv.TypingUsers = make(map[string]int64)
+	}
+	if isTyping {
+		conv.TypingUsers[cm.localID] = time.Now().Unix()
+	} else {
+		delete(conv.TypingUsers, cm.localID)
+	}
+	conv.mu.Unlock()
+}
+
+// ReceiveDMTyping handles typing indicator from another user
+func (cm *ChatManager) ReceiveDMTyping(fromUserID string, isTyping bool) {
+	convID := cm.getConversationID(cm.localID, fromUserID)
+	cm.mu.Lock()
+	conv, exists := cm.conversations[convID]
+	cm.mu.Unlock()
+	
+	if !exists {
+		return
+	}
+	
+	conv.mu.Lock()
+	if conv.TypingUsers == nil {
+		conv.TypingUsers = make(map[string]int64)
+	}
+	if isTyping {
+		conv.TypingUsers[fromUserID] = time.Now().Unix()
+	} else {
+		delete(conv.TypingUsers, fromUserID)
+	}
+	conv.mu.Unlock()
+}
+
+// GetDMTypingUsers returns users currently typing in a conversation
+func (cm *ChatManager) GetDMTypingUsers(userID string) []string {
+	convID := cm.getConversationID(cm.localID, userID)
+	cm.mu.RLock()
+	conv, exists := cm.conversations[convID]
+	cm.mu.RUnlock()
+	
+	if !exists {
+		return nil
+	}
+	
+	conv.mu.RLock()
+	defer conv.mu.RUnlock()
+	
+	cutoff := time.Now().Unix() - 5 // 5 second timeout
+	typing := make([]string, 0)
+	for uid, ts := range conv.TypingUsers {
+		if ts > cutoff && uid != cm.localID {
+			typing = append(typing, uid)
+		}
+	}
+	return typing
+}
+
+// PinConversation pins/unpins a conversation
+func (cm *ChatManager) PinConversation(userID string, pinned bool) {
+	convID := cm.getConversationID(cm.localID, userID)
+	cm.mu.Lock()
+	conv, exists := cm.conversations[convID]
+	cm.mu.Unlock()
+	
+	if !exists {
+		return
+	}
+	
+	conv.mu.Lock()
+	conv.Pinned = pinned
+	conv.mu.Unlock()
+	
+	go cm.Save()
+}
+
+// MuteConversation mutes/unmutes a conversation
+func (cm *ChatManager) MuteConversation(userID string, muted bool) {
+	convID := cm.getConversationID(cm.localID, userID)
+	cm.mu.Lock()
+	conv, exists := cm.conversations[convID]
+	cm.mu.Unlock()
+	
+	if !exists {
+		return
+	}
+	
+	conv.mu.Lock()
+	conv.Muted = muted
+	conv.mu.Unlock()
+	
+	go cm.Save()
+}
+
+// ArchiveConversation archives/unarchives a conversation
+func (cm *ChatManager) ArchiveConversation(userID string, archived bool) {
+	convID := cm.getConversationID(cm.localID, userID)
+	cm.mu.Lock()
+	conv, exists := cm.conversations[convID]
+	cm.mu.Unlock()
+	
+	if !exists {
+		return
+	}
+	
+	conv.mu.Lock()
+	conv.Archived = archived
+	conv.mu.Unlock()
+	
+	go cm.Save()
+}
+
+// GetArchivedConversations returns archived conversations
+func (cm *ChatManager) GetArchivedConversations() []*DirectConversation {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+
+	convs := make([]*DirectConversation, 0)
+	for _, conv := range cm.conversations {
+		if conv.Archived {
+			convs = append(convs, conv)
+		}
+	}
+
 	sort.Slice(convs, func(i, j int) bool {
 		return convs[i].LastMessage.After(convs[j].LastMessage)
 	})
 
 	return convs
+}
+
+// DeleteDMMessage soft-deletes a message
+func (cm *ChatManager) DeleteDMMessage(userID, messageID string) error {
+	convID := cm.getConversationID(cm.localID, userID)
+	cm.mu.RLock()
+	conv, exists := cm.conversations[convID]
+	cm.mu.RUnlock()
+	
+	if !exists {
+		return ErrConversationNotFound
+	}
+	
+	conv.mu.Lock()
+	defer conv.mu.Unlock()
+	
+	for _, msg := range conv.Messages {
+		if msg.ID == messageID && msg.SenderID == cm.localID {
+			msg.Edited = true
+			msg.Content = "[Message deleted]"
+			go cm.Save()
+			return nil
+		}
+	}
+	
+	return ErrMessageNotFound
+}
+
+// SendDMWithReply sends a DM as a reply to another message
+func (cm *ChatManager) SendDMWithReply(receiverID, content, replyToID string, media *MediaAttachment) (*Message, error) {
+	msg, err := cm.SendDM(receiverID, content, media)
+	if err != nil {
+		return nil, err
+	}
+	
+	msg.ReplyTo = replyToID
+	go cm.Save()
+	return msg, nil
+}
+
+// SearchDMMessages searches messages in a DM conversation
+func (cm *ChatManager) SearchDMMessages(userID, query string) []*Message {
+	convID := cm.getConversationID(cm.localID, userID)
+	cm.mu.RLock()
+	conv, exists := cm.conversations[convID]
+	cm.mu.RUnlock()
+	
+	if !exists {
+		return nil
+	}
+	
+	conv.mu.RLock()
+	defer conv.mu.RUnlock()
+	
+	query = strings.ToLower(query)
+	results := make([]*Message, 0)
+	
+	for _, msg := range conv.Messages {
+		if strings.Contains(strings.ToLower(msg.Content), query) {
+			results = append(results, msg)
+		}
+	}
+	
+	return results
+}
+
+// SetDMDraft saves a draft message for a conversation
+func (cm *ChatManager) SetDMDraft(userID, draft string) {
+	convID := cm.getConversationID(cm.localID, userID)
+	cm.mu.Lock()
+	conv, exists := cm.conversations[convID]
+	if !exists && draft != "" {
+		conv = &DirectConversation{
+			ID:           convID,
+			Participants: []string{cm.localID, userID},
+			CreatedAt:    time.Now(),
+			Messages:     make([]*Message, 0),
+			LastRead:     make(map[string]string),
+			TypingUsers:  make(map[string]int64),
+			Nickname:     make(map[string]string),
+		}
+		cm.conversations[convID] = conv
+	}
+	cm.mu.Unlock()
+	
+	if conv == nil {
+		return
+	}
+	
+	conv.mu.Lock()
+	conv.Draft = draft
+	conv.mu.Unlock()
+	
+	go cm.Save()
+}
+
+// GetDMDraft returns the draft message for a conversation
+func (cm *ChatManager) GetDMDraft(userID string) string {
+	convID := cm.getConversationID(cm.localID, userID)
+	cm.mu.RLock()
+	conv, exists := cm.conversations[convID]
+	cm.mu.RUnlock()
+	
+	if !exists {
+		return ""
+	}
+	
+	conv.mu.RLock()
+	defer conv.mu.RUnlock()
+	return conv.Draft
+}
+
+// SetDMNickname sets a custom nickname for a user in DMs
+func (cm *ChatManager) SetDMNickname(userID, nickname string) {
+	convID := cm.getConversationID(cm.localID, userID)
+	cm.mu.Lock()
+	conv, exists := cm.conversations[convID]
+	cm.mu.Unlock()
+	
+	if !exists {
+		return
+	}
+	
+	conv.mu.Lock()
+	if conv.Nickname == nil {
+		conv.Nickname = make(map[string]string)
+	}
+	if nickname == "" {
+		delete(conv.Nickname, userID)
+	} else {
+		conv.Nickname[userID] = nickname
+	}
+	conv.mu.Unlock()
+	
+	go cm.Save()
+}
+
+// GetDMNickname returns the custom nickname for a user
+func (cm *ChatManager) GetDMNickname(userID string) string {
+	convID := cm.getConversationID(cm.localID, userID)
+	cm.mu.RLock()
+	conv, exists := cm.conversations[convID]
+	cm.mu.RUnlock()
+	
+	if !exists {
+		return ""
+	}
+	
+	conv.mu.RLock()
+	defer conv.mu.RUnlock()
+	return conv.Nickname[userID]
+}
+
+// GetTotalUnreadDMs returns total unread DM count
+func (cm *ChatManager) GetTotalUnreadDMs() int {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	
+	total := 0
+	for _, conv := range cm.conversations {
+		if !conv.Muted && !conv.Archived {
+			total += conv.Unread
+		}
+	}
+	return total
+}
+
+// ClearDMHistory clears all messages in a conversation
+func (cm *ChatManager) ClearDMHistory(userID string) {
+	convID := cm.getConversationID(cm.localID, userID)
+	cm.mu.Lock()
+	conv, exists := cm.conversations[convID]
+	cm.mu.Unlock()
+	
+	if !exists {
+		return
+	}
+	
+	conv.mu.Lock()
+	conv.Messages = make([]*Message, 0)
+	conv.Unread = 0
+	conv.mu.Unlock()
+	
+	go cm.Save()
+}
+
+// DeleteConversation completely removes a conversation
+func (cm *ChatManager) DeleteConversation(userID string) {
+	convID := cm.getConversationID(cm.localID, userID)
+	cm.mu.Lock()
+	delete(cm.conversations, convID)
+	cm.mu.Unlock()
+	
+	go cm.Save()
 }
 
 // GetUser returns a user by ID
@@ -1279,13 +1783,14 @@ func (cm *ChatManager) Stats() map[string]interface{} {
 
 // Errors
 var (
-	ErrNotMember        = &ChatError{"not a member of private room"}
-	ErrInvalidSignature = &ChatError{"invalid message signature"}
-	ErrUserNotFound     = &ChatError{"user not found"}
-	ErrDMsDisabled      = &ChatError{"user has disabled direct messages"}
-	ErrBlocked          = &ChatError{"you are blocked by this user"}
-	ErrRoomNotFound     = &ChatError{"room not found"}
-	ErrMessageNotFound  = &ChatError{"message not found"}
+	ErrNotMember            = &ChatError{"not a member of private room"}
+	ErrInvalidSignature     = &ChatError{"invalid message signature"}
+	ErrUserNotFound         = &ChatError{"user not found"}
+	ErrDMsDisabled          = &ChatError{"user has disabled direct messages"}
+	ErrBlocked              = &ChatError{"you are blocked by this user"}
+	ErrRoomNotFound         = &ChatError{"room not found"}
+	ErrMessageNotFound      = &ChatError{"message not found"}
+	ErrConversationNotFound = &ChatError{"conversation not found"}
 )
 
 type ChatError struct {

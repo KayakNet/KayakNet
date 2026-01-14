@@ -559,6 +559,19 @@ func (m *Marketplace) AddListing(listing *Listing) error {
 	return nil
 }
 
+// ImportListing imports a listing from sync (no signature verification)
+func (m *Marketplace) ImportListing(listing *Listing) {
+	m.mu.Lock()
+	// Only import if it doesn't exist
+	if _, exists := m.listings[listing.ID]; !exists {
+		m.listings[listing.ID] = listing
+	}
+	m.mu.Unlock()
+
+	// Persist to disk
+	go m.Save()
+}
+
 // RemoveListing removes a listing (only owner can do this)
 func (m *Marketplace) RemoveListing(id string) error {
 	m.mu.Lock()

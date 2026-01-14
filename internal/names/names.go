@@ -168,6 +168,41 @@ func (ns *NameService) loadData() {
 	}
 }
 
+// ImportDomain imports a domain from another node (for sync)
+func (ns *NameService) ImportDomain(name, description, owner, serviceType string, createdAt, expiresAt time.Time) error {
+	name = normalizeName(name)
+	
+	ns.mu.Lock()
+	defer ns.mu.Unlock()
+	
+	// Only import if not already exists or expired
+	if existing, ok := ns.names[name]; ok {
+		if time.Now().Before(existing.ExpiresAt) {
+			return nil // Already exists and not expired
+		}
+	}
+	
+	reg := &Registration{
+		Name:        name,
+		FullName:    name + DomainSuffix,
+		NodeID:      owner,
+		Description: description,
+		ServiceType: serviceType,
+		CreatedAt:   createdAt,
+		ExpiresAt:   expiresAt,
+		UpdatedAt:   time.Now(),
+		Metadata:    make(map[string]string),
+	}
+	
+	ns.names[name] = reg
+	ns.byNodeID[owner] = append(ns.byNodeID[owner], name)
+	
+	// Save after import
+	go ns.Save()
+	
+	return nil
+}
+
 // Register registers a new .kyk domain
 func (ns *NameService) Register(name, description, serviceType string) (*Registration, error) {
 	name = normalizeName(name)
