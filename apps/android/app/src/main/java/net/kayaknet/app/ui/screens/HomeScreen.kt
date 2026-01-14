@@ -1,6 +1,5 @@
 package net.kayaknet.app.ui.screens
 
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -18,14 +17,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import net.kayaknet.app.KayakNetApp
-import net.kayaknet.app.R
 import net.kayaknet.app.network.ConnectionState
 
 @Composable
@@ -54,22 +50,13 @@ fun HomeScreen(
                 .background(Color(0xFF00FF00).copy(alpha = 0.1f)),
             contentAlignment = Alignment.Center
         ) {
-            // Try to load logo, fallback to text
-            try {
-                Image(
-                    painter = painterResource(id = R.drawable.logo),
-                    contentDescription = "KayakNet Logo",
-                    modifier = Modifier.size(60.dp)
-                )
-            } catch (e: Exception) {
-                Text(
-                    "K",
-                    color = Color(0xFF00FF00),
-                    fontSize = 40.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace
-                )
-            }
+            Text(
+                "K",
+                color = Color(0xFF00FF00),
+                fontSize = 40.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace
+            )
         }
         
         Spacer(modifier = Modifier.height(16.dp))

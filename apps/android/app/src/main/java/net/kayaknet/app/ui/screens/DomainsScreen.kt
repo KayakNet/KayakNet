@@ -466,7 +466,7 @@ fun RegisterDomainDialog(
                     ExposedDropdownMenu(
                         expanded = serviceExpanded,
                         onDismissRequest = { serviceExpanded = false },
-                        containerColor = Color(0xFF0D0D0D)
+                        modifier = Modifier.background(Color(0xFF0D0D0D))
                     ) {
                         serviceTypes.forEach { type ->
                             DropdownMenuItem(
@@ -623,24 +623,14 @@ fun DomainDetailDialog(
                     }
                 }
                 
-                domain.createdAt?.let {
-                    try {
-                        val inputFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault())
-                        val date = inputFormat.parse(it.take(19))
-                        if (date != null) {
-                            DetailRow("Registered", dateFormat.format(date))
-                        }
-                    } catch (e: Exception) {}
+                val createdDate = domain.createdAt?.let { parseDate(it) }
+                if (createdDate != null) {
+                    DetailRow("Registered", dateFormat.format(createdDate))
                 }
                 
-                domain.expiresAt?.let {
-                    try {
-                        val inputFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault())
-                        val date = inputFormat.parse(it.take(19))
-                        if (date != null) {
-                            DetailRow("Expires", dateFormat.format(date))
-                        }
-                    } catch (e: Exception) {}
+                val expiresDate = domain.expiresAt?.let { parseDate(it) }
+                if (expiresDate != null) {
+                    DetailRow("Expires", dateFormat.format(expiresDate))
                 }
             }
         },
@@ -650,6 +640,15 @@ fun DomainDetailDialog(
             }
         }
     )
+}
+
+private fun parseDate(dateStr: String): Date? {
+    return try {
+        val inputFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault())
+        inputFormat.parse(dateStr.take(19))
+    } catch (e: Exception) {
+        null
+    }
 }
 
 @Composable

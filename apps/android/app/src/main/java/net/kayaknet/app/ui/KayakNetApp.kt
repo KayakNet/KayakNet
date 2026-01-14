@@ -124,7 +124,13 @@ fun KayakNetAppUI() {
             startDestination = Screen.Home.route,
             modifier = Modifier.padding(paddingValues)
         ) {
-            composable(Screen.Home.route) { HomeScreen() }
+            composable(Screen.Home.route) { HomeScreen(onNavigate = { route ->
+                navController.navigate(route) {
+                    popUpTo(navController.graph.startDestinationId) { saveState = true }
+                    launchSingleTop = true
+                    restoreState = true
+                }
+            }) }
             composable(Screen.Chat.route) { ChatScreen() }
             composable(Screen.Market.route) { MarketScreen() }
             composable(Screen.Domains.route) { DomainsScreen() }

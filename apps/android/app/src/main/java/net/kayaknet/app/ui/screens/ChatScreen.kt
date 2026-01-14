@@ -823,7 +823,7 @@ fun ChatMessageItem(
     DropdownMenu(
         expanded = showOptions,
         onDismissRequest = { showOptions = false },
-        containerColor = Color(0xFF0D0D0D)
+        modifier = Modifier.background(Color(0xFF0D0D0D))
     ) {
         DropdownMenuItem(
             text = { Text("Reply", color = Color(0xFF00FF00)) },

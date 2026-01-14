@@ -11,7 +11,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -169,12 +171,6 @@ fun MarketScreen() {
                         selectedLabelColor = Color.Black,
                         containerColor = Color.Transparent,
                         labelColor = Color(0xFF00FF00)
-                    ),
-                    border = FilterChipDefaults.filterChipBorder(
-                        borderColor = Color(0xFF00FF00).copy(alpha = 0.3f),
-                        selectedBorderColor = Color(0xFF00FF00),
-                        enabled = true,
-                        selected = selectedCategory == category
                     )
                 )
             }
@@ -408,7 +404,7 @@ fun CreateListingDialog(
         title = { Text("CREATE LISTING", color = Color(0xFF00FF00)) },
         text = {
             Column(
-                modifier = Modifier.verticalScroll(androidx.compose.foundation.rememberScrollState())
+                modifier = Modifier.verticalScroll(rememberScrollState())
             ) {
                 OutlinedTextField(
                     value = title,
@@ -484,7 +480,7 @@ fun CreateListingDialog(
                         ExposedDropdownMenu(
                             expanded = currencyExpanded,
                             onDismissRequest = { currencyExpanded = false },
-                            containerColor = Color(0xFF0D0D0D)
+                            modifier = Modifier.background(Color(0xFF0D0D0D))
                         ) {
                             listOf("XMR", "ZEC").forEach { cur ->
                                 DropdownMenuItem(
@@ -525,7 +521,7 @@ fun CreateListingDialog(
                     ExposedDropdownMenu(
                         expanded = categoryExpanded,
                         onDismissRequest = { categoryExpanded = false },
-                        containerColor = Color(0xFF0D0D0D)
+                        modifier = Modifier.background(Color(0xFF0D0D0D))
                     ) {
                         listOf("Digital Goods", "Services", "Physical", "Art", "Software", "Other").forEach { cat ->
                             DropdownMenuItem(
