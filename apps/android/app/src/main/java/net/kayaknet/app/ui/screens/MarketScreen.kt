@@ -72,6 +72,9 @@ fun MarketScreen() {
     var selectedListing by remember { mutableStateOf<Listing?>(null) }
     var showEscrows by remember { mutableStateOf(false) }
     var sortBy by remember { mutableStateOf("recent") }
+    var isBuying by remember { mutableStateOf(false) }
+    var buyError by remember { mutableStateOf<String?>(null) }
+    var buySuccess by remember { mutableStateOf(false) }
     
     val categories = listOf(
         "All", "Digital Goods", "Services", "Physical", "Art", "Software", "Other"
@@ -295,10 +298,33 @@ fun MarketScreen() {
     selectedListing?.let { listing ->
         ListingDetailDialog(
             listing = listing,
-            onDismiss = { selectedListing = null },
+            onDismiss = { 
+                selectedListing = null 
+                buyError = null
+                buySuccess = false
+            },
+            isBuying = isBuying,
+            buyError = buyError,
+            buySuccess = buySuccess,
             onBuy = { amount, currency ->
+                isBuying = true
+                buyError = null
                 scope.launch {
-                    client.createEscrow(listing.id, amount, currency)
+                    try {
+                        val result = client.createEscrow(listing.id, amount, currency)
+                        if (result.isSuccess) {
+                            buySuccess = true
+                            buyError = null
+                            // Refresh escrows
+                            client.fetchMyEscrows()
+                        } else {
+                            buyError = result.exceptionOrNull()?.message ?: "Failed to create order"
+                        }
+                    } catch (e: Exception) {
+                        buyError = e.message ?: "Error creating order"
+                    } finally {
+                        isBuying = false
+                    }
                 }
             },
             onMessageSeller = {
@@ -704,10 +730,13 @@ fun ListingDetailDialog(
     listing: Listing,
     onDismiss: () -> Unit,
     onBuy: (Double, String) -> Unit,
-    onMessageSeller: () -> Unit
+    onMessageSeller: () -> Unit,
+    isBuying: Boolean = false,
+    buyError: String? = null,
+    buySuccess: Boolean = false
 ) {
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!isBuying) onDismiss() },
         containerColor = Color(0xFF0D0D0D),
         title = { 
             Text(
@@ -718,62 +747,129 @@ fun ListingDetailDialog(
         },
         text = {
             Column {
-                Text(
-                    listing.description.ifEmpty { "No description available" },
-                    color = Color(0xFF00FF00).copy(alpha = 0.9f)
-                )
-                
-                Spacer(modifier = Modifier.height(16.dp))
-                
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column {
-                        Text("Price", color = Color(0xFF00FF00).copy(alpha = 0.5f), fontSize = 10.sp)
+                if (buySuccess) {
+                    // Show success message
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Icon(
+                            Icons.Filled.Check,
+                            contentDescription = "Success",
+                            tint = Color(0xFF00FF00),
+                            modifier = Modifier.size(48.dp)
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            "${listing.price} ${listing.currency.ifEmpty { "USD" }}",
-                            color = Color(0xFF00FFFF),
+                            "ORDER CREATED!",
+                            color = Color(0xFF00FF00),
                             fontWeight = FontWeight.Bold,
-                            fontSize = 18.sp
+                            fontSize = 16.sp
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            "Check your orders to see payment details",
+                            color = Color(0xFF00FF00).copy(alpha = 0.7f),
+                            fontSize = 12.sp
                         )
                     }
-                    Column(horizontalAlignment = Alignment.End) {
-                        Text("Category", color = Color(0xFF00FF00).copy(alpha = 0.5f), fontSize = 10.sp)
-                        Text(listing.category.ifEmpty { "Other" }, color = Color(0xFF00FF00))
+                } else {
+                    Text(
+                        listing.description.ifEmpty { "No description available" },
+                        color = Color(0xFF00FF00).copy(alpha = 0.9f)
+                    )
+                    
+                    Spacer(modifier = Modifier.height(16.dp))
+                    
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column {
+                            Text("Price", color = Color(0xFF00FF00).copy(alpha = 0.5f), fontSize = 10.sp)
+                            Text(
+                                "${listing.price} ${listing.currency.ifEmpty { "USD" }}",
+                                color = Color(0xFF00FFFF),
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 18.sp
+                            )
+                        }
+                        Column(horizontalAlignment = Alignment.End) {
+                            Text("Category", color = Color(0xFF00FF00).copy(alpha = 0.5f), fontSize = 10.sp)
+                            Text(listing.category.ifEmpty { "Other" }, color = Color(0xFF00FF00))
+                        }
+                    }
+                    
+                    Spacer(modifier = Modifier.height(16.dp))
+                    
+                    Text("Seller", color = Color(0xFF00FF00).copy(alpha = 0.5f), fontSize = 10.sp)
+                    val sellerDisplay = listing.sellerName.let { name ->
+                        if (name.isNullOrEmpty()) listing.seller.take(16) else name
+                    }
+                    Text(
+                        sellerDisplay,
+                        color = Color(0xFF00FF00)
+                    )
+                    
+                    // Show error if any
+                    buyError?.let { error ->
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            "Error: $error",
+                            color = Color.Red,
+                            fontSize = 12.sp
+                        )
                     }
                 }
-                
-                Spacer(modifier = Modifier.height(16.dp))
-                
-                Text("Seller", color = Color(0xFF00FF00).copy(alpha = 0.5f), fontSize = 10.sp)
-                val sellerDisplay = listing.sellerName.let { name ->
-                    if (name.isNullOrEmpty()) listing.seller.take(16) else name
-                }
-                Text(
-                    sellerDisplay,
-                    color = Color(0xFF00FF00)
-                )
             }
         },
         confirmButton = {
-            Button(
-                onClick = { onBuy(listing.price, listing.currency) },
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFF00FF00),
-                    contentColor = Color.Black
-                )
-            ) {
-                Text("BUY NOW")
+            if (buySuccess) {
+                Button(
+                    onClick = onDismiss,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF00FF00),
+                        contentColor = Color.Black
+                    )
+                ) {
+                    Text("VIEW ORDERS")
+                }
+            } else {
+                Button(
+                    onClick = { onBuy(listing.price, listing.currency.ifEmpty { "XMR" }) },
+                    enabled = !isBuying,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF00FF00),
+                        contentColor = Color.Black
+                    )
+                ) {
+                    if (isBuying) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            color = Color.Black,
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Text("BUY NOW")
+                    }
+                }
             }
         },
         dismissButton = {
-            Row {
-                TextButton(onClick = onMessageSeller) {
-                    Text("MESSAGE", color = Color(0xFF00FF00))
-                }
-                TextButton(onClick = onDismiss) {
-                    Text("CLOSE", color = Color(0xFF00FF00))
+            if (!buySuccess) {
+                Row {
+                    TextButton(
+                        onClick = onMessageSeller,
+                        enabled = !isBuying
+                    ) {
+                        Text("MESSAGE", color = Color(0xFF00FF00))
+                    }
+                    TextButton(
+                        onClick = onDismiss,
+                        enabled = !isBuying
+                    ) {
+                        Text("CLOSE", color = Color(0xFF00FF00))
+                    }
                 }
             }
         }
