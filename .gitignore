@@ -29,10 +29,21 @@ Thumbs.db
 
 # Data directories
 data/
+test/data/
+
+# JSON files (except templates)
 *.json
 !package.json
 !tsconfig.json
-!config.example.json
+!config/templates/*.json
+!book.json
+
+# Wallets and keys
+*.keys
+*.key
+wallets/
+.password
+.rpc_password
 
 # Logs
 *.log
@@ -40,6 +51,16 @@ data/
 # Build
 /bin/
 /dist/
+
+# Releases (binaries go to GitHub Releases)
+/releases/
+*.zip
+
+# Android APKs (built by CI)
+/android-apk/
+/android-build/
+*.apk
+*.aab
 
 # Docker
 .docker/

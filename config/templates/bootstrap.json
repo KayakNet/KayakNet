@@ -1,0 +1,85 @@
+{
+  "node": {
+    "name": "kayaknet-bootstrap-01",
+    "data_dir": "/var/lib/kayaknet",
+    "identity_file": "/var/lib/kayaknet/identity.json",
+    "mode": "bootstrap"
+  },
+  "dht": {
+    "k": 20,
+    "alpha": 3,
+    "record_ttl": "24h",
+    "refresh_interval": "1h",
+    "bootstrap_nodes": []
+  },
+  "pubsub": {
+    "max_topics": 1000,
+    "max_peers_per_topic": 100,
+    "message_buffer_size": 10000,
+    "rate_limit_window": "1s",
+    "rate_limit_messages": 1000
+  },
+  "transport": {
+    "udp": {
+      "enabled": true,
+      "listen_addr": "0.0.0.0:4242",
+      "max_packet_size": 65535
+    },
+    "tcp": {
+      "enabled": false,
+      "listen_addr": "0.0.0.0:4243"
+    },
+    "tor": {
+      "enabled": false,
+      "proxy_addr": "127.0.0.1:9050"
+    },
+    "i2p": {
+      "enabled": false,
+      "sam_addr": "127.0.0.1:7656"
+    }
+  },
+  "security": {
+    "rate_limit_window": "1s",
+    "rate_limit_messages": 1000,
+    "ban_threshold": 20,
+    "initial_ban_time": "5m",
+    "max_ban_time": "168h",
+    "onion_hops": 3,
+    "circuit_timeout": "30s",
+    "padding_size": 2048,
+    "batch_interval": "100ms",
+    "max_delay": "500ms",
+    "dummy_traffic_rate": 0.05
+  },
+  "proxy": {
+    "enabled": false,
+    "http_port": 8118,
+    "socks5_port": 8119,
+    "homepage_port": 8080,
+    "allow_external": false,
+    "bind_address": "127.0.0.1"
+  },
+  "crypto": {
+    "monero": {
+      "enabled": false,
+      "rpc_host": "127.0.0.1",
+      "rpc_port": 18082,
+      "network": "mainnet"
+    },
+    "zcash": {
+      "enabled": false,
+      "rpc_host": "127.0.0.1",
+      "rpc_port": 8232,
+      "network": "mainnet"
+    }
+  },
+  "logging": {
+    "level": "info",
+    "file": "/var/log/kayaknet/kayakd.log",
+    "max_size_mb": 100,
+    "max_backups": 5,
+    "max_age_days": 30,
+    "compress": true
+  }
+}
+
