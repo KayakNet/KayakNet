@@ -37,19 +37,32 @@ import java.util.*
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MarketScreen() {
-    val client = remember { KayakNetApp.instance.client }
+    val client = remember { 
+        try { KayakNetApp.instance.client } catch (e: Exception) { null }
+    }
+    
+    if (client == null) {
+        Box(
+            modifier = Modifier.fillMaxSize().background(Color(0xFF0A0A0A)),
+            contentAlignment = Alignment.Center
+        ) {
+            Text("// Loading...", color = Color(0xFF00FF00))
+        }
+        return
+    }
+    
     val connectionState by client.connectionState.collectAsState()
     val listings by client.listings.collectAsState()
     val myEscrows by client.myEscrows.collectAsState()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     
-    // Fetch escrows on screen load
+    // Fetch escrows on screen load - safely
     LaunchedEffect(Unit) {
         try {
             client.fetchMyEscrows()
         } catch (e: Exception) {
-            // Ignore errors
+            e.printStackTrace()
         }
     }
     
@@ -349,7 +362,7 @@ fun ListingCard(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        listing.title,
+                        listing.title.ifEmpty { "Untitled" },
                         color = Color(0xFF00FF00),
                         fontWeight = FontWeight.Bold,
                         fontSize = 14.sp,
@@ -358,7 +371,7 @@ fun ListingCard(
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        listing.description,
+                        listing.description.ifEmpty { "No description" },
                         color = Color(0xFF00FF00).copy(alpha = 0.7f),
                         fontSize = 12.sp,
                         maxLines = 2,
@@ -368,13 +381,13 @@ fun ListingCard(
                 
                 Column(horizontalAlignment = Alignment.End) {
                     Text(
-                        "${listing.price} ${listing.currency}",
+                        "${listing.price} ${listing.currency.ifEmpty { "USD" }}",
                         color = Color(0xFF00FFFF),
                         fontWeight = FontWeight.Bold,
                         fontSize = 14.sp
                     )
                     Text(
-                        listing.category,
+                        listing.category.ifEmpty { "Other" },
                         color = Color(0xFF00FF00).copy(alpha = 0.5f),
                         fontSize = 10.sp
                     )
@@ -387,8 +400,11 @@ fun ListingCard(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
+                val sellerDisplay = listing.sellerName.let { name ->
+                    if (name.isNullOrEmpty()) listing.seller.take(8) else name
+                }
                 Text(
-                    "by ${listing.sellerName.ifEmpty { listing.seller.take(8) }}",
+                    "by $sellerDisplay",
                     color = Color(0xFF00FF00).copy(alpha = 0.5f),
                     fontSize = 10.sp
                 )
@@ -695,7 +711,7 @@ fun ListingDetailDialog(
         containerColor = Color(0xFF0D0D0D),
         title = { 
             Text(
-                listing.title,
+                listing.title.ifEmpty { "Listing" },
                 color = Color(0xFF00FF00),
                 fontWeight = FontWeight.Bold
             )
@@ -703,7 +719,7 @@ fun ListingDetailDialog(
         text = {
             Column {
                 Text(
-                    listing.description,
+                    listing.description.ifEmpty { "No description available" },
                     color = Color(0xFF00FF00).copy(alpha = 0.9f)
                 )
                 
@@ -716,7 +732,7 @@ fun ListingDetailDialog(
                     Column {
                         Text("Price", color = Color(0xFF00FF00).copy(alpha = 0.5f), fontSize = 10.sp)
                         Text(
-                            "${listing.price} ${listing.currency}",
+                            "${listing.price} ${listing.currency.ifEmpty { "USD" }}",
                             color = Color(0xFF00FFFF),
                             fontWeight = FontWeight.Bold,
                             fontSize = 18.sp
@@ -724,15 +740,18 @@ fun ListingDetailDialog(
                     }
                     Column(horizontalAlignment = Alignment.End) {
                         Text("Category", color = Color(0xFF00FF00).copy(alpha = 0.5f), fontSize = 10.sp)
-                        Text(listing.category, color = Color(0xFF00FF00))
+                        Text(listing.category.ifEmpty { "Other" }, color = Color(0xFF00FF00))
                     }
                 }
                 
                 Spacer(modifier = Modifier.height(16.dp))
                 
                 Text("Seller", color = Color(0xFF00FF00).copy(alpha = 0.5f), fontSize = 10.sp)
+                val sellerDisplay = listing.sellerName.let { name ->
+                    if (name.isNullOrEmpty()) listing.seller.take(16) else name
+                }
                 Text(
-                    listing.sellerName.ifEmpty { listing.seller.take(16) },
+                    sellerDisplay,
                     color = Color(0xFF00FF00)
                 )
             }
@@ -1003,8 +1022,9 @@ fun EscrowCard(
     onMarkShipped: () -> Unit,
     onManualConfirm: () -> Unit
 ) {
-    val escrowId = escrow.escrow_id.ifEmpty { escrow.id }
-    val state = escrow.state.ifEmpty { escrow.status }
+    val escrowId = try { escrow.escrow_id.ifEmpty { escrow.id } } catch (e: Exception) { "unknown" }
+    val state = try { escrow.state.ifEmpty { escrow.status }.ifEmpty { "unknown" } } catch (e: Exception) { "unknown" }
+    val amountDisplay = try { "%.6f".format(escrow.amount) } catch (e: Exception) { escrow.amount.toString() }
     
     Card(
         modifier = Modifier
@@ -1020,7 +1040,7 @@ fun EscrowCard(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        escrow.listing_title.ifEmpty { "Order" },
+                        try { escrow.listing_title.ifEmpty { "Order" } } catch (e: Exception) { "Order" },
                         color = Color(0xFF00FF00),
                         fontWeight = FontWeight.Bold,
                         fontSize = 14.sp,
@@ -1028,7 +1048,7 @@ fun EscrowCard(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        "${String.format("%.6f", escrow.amount)} ${escrow.currency}",
+                        "$amountDisplay ${escrow.currency.ifEmpty { "XMR" }}",
                         color = Color(0xFF00FFFF),
                         fontWeight = FontWeight.Bold,
                         fontSize = 12.sp

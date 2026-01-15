@@ -1279,14 +1279,14 @@ data class User(
 )
 
 data class Listing(
-    val id: String,
-    val title: String,
-    val description: String,
-    val price: Double,
-    val currency: String,
-    val category: String,
-    val seller: String,
-    val sellerName: String,
+    val id: String = "",
+    val title: String = "",
+    val description: String = "",
+    val price: Double = 0.0,
+    val currency: String = "USD",
+    val category: String = "Other",
+    val seller: String = "",
+    val sellerName: String = "",
     val imageUrl: String? = null,
     val image: String? = null,
     val created_at: String? = null,
