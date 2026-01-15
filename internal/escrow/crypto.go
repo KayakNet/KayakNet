@@ -112,6 +112,13 @@ func (w *CryptoWallet) IsEnabled(crypto CryptoType) bool {
 	return w.enabled[crypto]
 }
 
+// IsConfigured returns true if any cryptocurrency backend is configured
+func (w *CryptoWallet) IsConfigured() bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.config.MoneroRPCHost != "" || w.config.ZcashRPCHost != ""
+}
+
 // GetEnabledCurrencies returns list of enabled cryptocurrencies
 func (w *CryptoWallet) GetEnabledCurrencies() []CryptoType {
 	w.mu.RLock()

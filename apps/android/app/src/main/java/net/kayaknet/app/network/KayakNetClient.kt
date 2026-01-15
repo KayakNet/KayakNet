@@ -752,7 +752,12 @@ class KayakNetClient(private val context: Context) {
         price: Double,
         currency: String,
         category: String,
-        imageData: String? = null
+        imageData: String? = null,
+        sellerXmrAddress: String? = null,
+        sellerZecAddress: String? = null,
+        stock: Int = -1,
+        shipsFrom: String? = null,
+        deliveryDays: Int = 7
     ): Result<Listing> {
         return try {
             val formBuilder = FormBody.Builder()
@@ -763,8 +768,13 @@ class KayakNetClient(private val context: Context) {
                 .add("category", category)
                 .add("seller", nodeId)
                 .add("seller_name", getLocalNick())
+                .add("stock", stock.toString())
+                .add("delivery_days", deliveryDays.toString())
             
             imageData?.let { formBuilder.add("image", it) }
+            sellerXmrAddress?.let { formBuilder.add("seller_xmr_address", it) }
+            sellerZecAddress?.let { formBuilder.add("seller_zec_address", it) }
+            shipsFrom?.let { formBuilder.add("ships_from", it) }
             
             val request = Request.Builder()
                 .url("http://$bootstrapHost:$bootstrapPort/api/create-listing")
@@ -782,7 +792,9 @@ class KayakNetClient(private val context: Context) {
                         currency = currency,
                         category = category,
                         seller = nodeId,
-                        sellerName = getLocalNick()
+                        sellerName = getLocalNick(),
+                        seller_xmr_address = sellerXmrAddress,
+                        seller_zec_address = sellerZecAddress
                     )
                     Result.success(listing)
                 } else {
@@ -832,14 +844,22 @@ class KayakNetClient(private val context: Context) {
     suspend fun fetchMyEscrows() {
         try {
             val request = Request.Builder()
-                .url("http://$bootstrapHost:$bootstrapPort/api/escrow/my?user=$nodeId")
+                .url("http://$bootstrapHost:$bootstrapPort/api/escrow/my?node_id=$nodeId")
                 .build()
             
             httpClient.newCall(request).execute().use { response ->
                 if (response.isSuccessful) {
                     val body = response.body?.string() ?: "[]"
                     val type = object : TypeToken<List<Escrow>>() {}.type
-                    _myEscrows.value = gson.fromJson(body, type) ?: emptyList()
+                    val escrows: List<Escrow> = gson.fromJson(body, type) ?: emptyList()
+                    
+                    // Set is_buyer and is_seller based on current node
+                    _myEscrows.value = escrows.map { escrow ->
+                        escrow.copy(
+                            is_buyer = escrow.buyer_id == nodeId,
+                            is_seller = escrow.seller_id == nodeId
+                        )
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -893,6 +913,132 @@ class KayakNetClient(private val context: Context) {
         } catch (e: Exception) {
             Log.e(TAG, "disputeEscrow error: ${e.message}")
             false
+        }
+    }
+    
+    suspend fun markEscrowShipped(escrowId: String, trackingInfo: String = ""): Boolean {
+        return try {
+            val formBody = FormBody.Builder()
+                .add("escrow_id", escrowId)
+                .add("tracking_info", trackingInfo)
+                .build()
+            
+            val request = Request.Builder()
+                .url("http://$bootstrapHost:$bootstrapPort/api/escrow/ship")
+                .post(formBody)
+                .build()
+            
+            httpClient.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    fetchMyEscrows()
+                    true
+                } else false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "markEscrowShipped error: ${e.message}")
+            false
+        }
+    }
+    
+    suspend fun confirmEscrowReceived(escrowId: String): Boolean {
+        return try {
+            val formBody = FormBody.Builder()
+                .add("escrow_id", escrowId)
+                .build()
+            
+            val request = Request.Builder()
+                .url("http://$bootstrapHost:$bootstrapPort/api/escrow/release")
+                .post(formBody)
+                .build()
+            
+            httpClient.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    fetchMyEscrows()
+                    true
+                } else false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "confirmEscrowReceived error: ${e.message}")
+            false
+        }
+    }
+    
+    suspend fun manualConfirmPayment(escrowId: String, txId: String): Boolean {
+        return try {
+            val formBody = FormBody.Builder()
+                .add("escrow_id", escrowId)
+                .add("tx_id", txId)
+                .build()
+            
+            val request = Request.Builder()
+                .url("http://$bootstrapHost:$bootstrapPort/api/escrow/manual-confirm")
+                .post(formBody)
+                .build()
+            
+            httpClient.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    fetchMyEscrows()
+                    true
+                } else false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "manualConfirmPayment error: ${e.message}")
+            false
+        }
+    }
+    
+    suspend fun getEscrowStatus(escrowId: String): Escrow? {
+        return try {
+            val request = Request.Builder()
+                .url("http://$bootstrapHost:$bootstrapPort/api/escrow/status?id=$escrowId&node_id=$nodeId")
+                .build()
+            
+            httpClient.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string()
+                    if (body != null) {
+                        gson.fromJson(body, Escrow::class.java)
+                    } else null
+                } else null
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "getEscrowStatus error: ${e.message}")
+            null
+        }
+    }
+    
+    suspend fun createEscrowOrder(
+        listingId: String,
+        currency: String,
+        buyerAddress: String,
+        deliveryInfo: String
+    ): Result<Escrow> {
+        return try {
+            val formBody = FormBody.Builder()
+                .add("listing_id", listingId)
+                .add("currency", currency)
+                .add("buyer_address", buyerAddress)
+                .add("delivery_info", deliveryInfo)
+                .build()
+            
+            val request = Request.Builder()
+                .url("http://$bootstrapHost:$bootstrapPort/api/escrow/create")
+                .post(formBody)
+                .build()
+            
+            httpClient.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string() ?: "{}"
+                    val escrow = gson.fromJson(body, Escrow::class.java)
+                    fetchMyEscrows()
+                    Result.success(escrow)
+                } else {
+                    val error = response.body?.string() ?: "Unknown error"
+                    Result.failure(Exception("Failed to create escrow: $error"))
+                }
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
         }
     }
     
@@ -1130,7 +1276,13 @@ data class Listing(
     val sellerName: String,
     val imageUrl: String? = null,
     val image: String? = null,
-    val created_at: String? = null
+    val created_at: String? = null,
+    val seller_xmr_address: String? = null,
+    val seller_zec_address: String? = null,
+    val stock: Int = -1,
+    val ships_from: String? = null,
+    val ships_to: List<String>? = null,
+    val delivery_days: Int = 7
 )
 
 data class Domain(
@@ -1145,12 +1297,24 @@ data class Domain(
 
 data class Escrow(
     val id: String = "",
+    val escrow_id: String = "",
+    val order_id: String = "",
     val listing_id: String = "",
-    val buyer: String = "",
-    val seller: String = "",
+    val listing_title: String = "",
+    val buyer_id: String = "",
+    val seller_id: String = "",
     val amount: Double = 0.0,
     val currency: String = "",
-    val status: String = "",
+    val state: String = "",  // created, funded, shipped, completed, disputed, refunded
+    val status: String = "", // For backwards compatibility
+    val payment_address: String = "",
     val address: String = "",
-    val created_at: String = ""
+    val tx_id: String = "",
+    val tracking_info: String = "",
+    val created_at: String = "",
+    val funded_at: String = "",
+    val shipped_at: String = "",
+    val auto_release_at: String = "",
+    val is_buyer: Boolean = false,
+    val is_seller: Boolean = false
 )

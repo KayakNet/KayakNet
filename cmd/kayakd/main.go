@@ -11,9 +11,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -42,7 +44,7 @@ import (
 )
 
 // Version is set at build time
-var Version = "v0.1.11"
+var Version = "v0.1.26"
 
 var (
 	configPath  = flag.String("config", "", "Path to configuration file")
@@ -183,10 +185,12 @@ func (h *Homepage) Start(port int) error {
 	mux.HandleFunc("/api/escrow/create", h.handleEscrowCreate)
 	mux.HandleFunc("/api/escrow/status", h.handleEscrowStatus)
 	mux.HandleFunc("/api/escrow/pay", h.handleEscrowPay)
+	mux.HandleFunc("/api/escrow/manual-confirm", h.handleEscrowManualConfirm)
 	mux.HandleFunc("/api/escrow/ship", h.handleEscrowShip)
 	mux.HandleFunc("/api/escrow/release", h.handleEscrowRelease)
 	mux.HandleFunc("/api/escrow/dispute", h.handleEscrowDispute)
 	mux.HandleFunc("/api/escrow/my", h.handleMyEscrows)
+	mux.HandleFunc("/api/escrow/all", h.handleAllEscrows)
 	mux.HandleFunc("/api/chat", h.handleChat)
 	mux.HandleFunc("/api/chat/rooms", h.handleChatRooms)
 	mux.HandleFunc("/api/chat/profile", h.handleChatProfile)
@@ -2671,6 +2675,8 @@ func (h *Homepage) handleCreateListing(w http.ResponseWriter, r *http.Request) {
 	currency := r.FormValue("currency")
 	description := r.FormValue("description")
 	image := r.FormValue("image")
+	sellerXMRAddr := r.FormValue("seller_xmr_address")
+	sellerZECAddr := r.FormValue("seller_zec_address")
 
 	if title == "" {
 		http.Error(w, "Title is required", http.StatusBadRequest)
@@ -2710,6 +2716,8 @@ func (h *Homepage) handleCreateListing(w http.ResponseWriter, r *http.Request) {
 		currency,
 		image,
 		sellerName,
+		sellerXMRAddr,
+		sellerZECAddr,
 		30*24*time.Hour, // 30 days TTL
 	)
 
@@ -2849,15 +2857,15 @@ func (h *Homepage) handleEscrowCreate(w http.ResponseWriter, r *http.Request) {
 	buyerAddress := r.FormValue("buyer_address")
 	deliveryInfo := r.FormValue("delivery_info")
 
+	// Check for forwarded params (from user nodes to bootstrap)
+	forwardedSellerAddr := r.FormValue("seller_address")
+	forwardedSellerID := r.FormValue("seller_id")
+	forwardedBuyer := r.FormValue("buyer")
+	forwardedAmount := r.FormValue("amount")
+	forwardedTitle := r.FormValue("listing_title")
+
 	if listingID == "" || currency == "" {
 		http.Error(w, "Missing required fields", http.StatusBadRequest)
-		return
-	}
-
-	// Get listing details
-	listing, err := h.node.marketplace.GetListing(listingID)
-	if err != nil {
-		http.Error(w, "Listing not found", http.StatusNotFound)
 		return
 	}
 
@@ -2868,26 +2876,98 @@ func (h *Homepage) handleEscrowCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Convert price to crypto amount (simplified - in production, use real exchange rates)
+	var listingTitle string
+	var sellerID string
+	var sellerAddress string
 	var cryptoAmount float64
-	rate, _ := escrow.GetExchangeRate(cryptoType)
-	if rate > 0 {
-		cryptoAmount = float64(listing.Price) / rate // Assuming price is in USD-equivalent
+	var buyerID string
+
+	// If this is a forwarded request from another node (bootstrap receiving from user node)
+	if forwardedSellerAddr != "" && forwardedSellerID != "" {
+		// Use forwarded params
+		sellerAddress = forwardedSellerAddr
+		sellerID = forwardedSellerID
+		listingTitle = forwardedTitle
+		if forwardedBuyer != "" {
+			buyerID = forwardedBuyer
+		} else {
+			buyerID = h.node.identity.NodeID()
+		}
+		if forwardedAmount != "" {
+			cryptoAmount, _ = strconv.ParseFloat(forwardedAmount, 64)
+		}
 	} else {
-		cryptoAmount = float64(listing.Price) / 100 // Fallback
+		// Get listing details locally
+		listing, err := h.node.marketplace.GetListing(listingID)
+		if err != nil {
+			http.Error(w, "Listing not found", http.StatusNotFound)
+			return
+		}
+
+		listingTitle = listing.Title
+		sellerID = listing.SellerID
+		buyerID = h.node.identity.NodeID()
+
+		// Convert price to crypto amount
+		rate, _ := escrow.GetExchangeRate(cryptoType)
+		if rate > 0 {
+			cryptoAmount = float64(listing.Price) / rate
+		} else {
+			cryptoAmount = float64(listing.Price) / 100
+		}
+
+		// Get seller's crypto address from listing
+		if currency == "XMR" {
+			sellerAddress = listing.SellerXMRAddress
+		} else if currency == "ZEC" {
+			sellerAddress = listing.SellerZECAddress
+		}
 	}
 
-	// Get seller's address (in production, this would be stored with the listing)
-	sellerAddress := ""
+	// Validate seller has an address for this currency
+	if sellerAddress == "" {
+		http.Error(w, fmt.Sprintf("Seller has not provided a %s address", currency), http.StatusBadRequest)
+		return
+	}
 
-	// Create escrow
+	// Check if local node has crypto configured, if not forward to bootstrap
+	if !h.node.cryptoWallet.IsConfigured() {
+		// Forward to bootstrap node with all listing details
+		bootstrapURL := "http://203.161.33.237:8080/api/escrow/create"
+
+		formData := url.Values{}
+		formData.Set("listing_id", listingID)
+		formData.Set("listing_title", listingTitle)
+		formData.Set("currency", currency)
+		formData.Set("buyer_address", buyerAddress)
+		formData.Set("delivery_info", deliveryInfo)
+		formData.Set("buyer", buyerID)
+		formData.Set("seller_id", sellerID)
+		formData.Set("seller_address", sellerAddress)
+		formData.Set("amount", fmt.Sprintf("%.8f", cryptoAmount))
+
+		resp, err := http.PostForm(bootstrapURL, formData)
+		if err != nil {
+			http.Error(w, "Failed to contact escrow service: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		defer resp.Body.Close()
+
+		// Forward response
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+		return
+	}
+
+	// Create escrow locally (for bootstrap node)
 	params := escrow.EscrowParams{
 		OrderID:       generateOrderID(),
 		ListingID:     listingID,
-		ListingTitle:  listing.Title,
-		BuyerID:       h.node.identity.NodeID(),
+		ListingTitle:  listingTitle,
+		BuyerID:       buyerID,
 		BuyerAddress:  buyerAddress,
-		SellerID:      listing.SellerID,
+		SellerID:      sellerID,
 		SellerAddress: sellerAddress,
 		Currency:      cryptoType,
 		Amount:        cryptoAmount,
@@ -2925,6 +3005,28 @@ func (h *Homepage) handleEscrowStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// If local node doesn't have crypto configured, forward to bootstrap
+	if !h.node.cryptoWallet.IsConfigured() {
+		bootstrapURL := "http://203.161.33.237:8080/api/escrow/status"
+		if escrowID != "" {
+			bootstrapURL += "?id=" + url.QueryEscape(escrowID) + "&node_id=" + url.QueryEscape(h.node.identity.NodeID())
+		} else if orderID != "" {
+			bootstrapURL += "?order_id=" + url.QueryEscape(orderID) + "&node_id=" + url.QueryEscape(h.node.identity.NodeID())
+		}
+
+		resp, err := http.Get(bootstrapURL)
+		if err != nil {
+			http.Error(w, "Failed to contact escrow service: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		defer resp.Body.Close()
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+		return
+	}
+
 	var esc *escrow.Escrow
 	var err error
 
@@ -2949,6 +3051,14 @@ func (h *Homepage) handleEscrowStatus(w http.ResponseWriter, r *http.Request) {
 		esc, _ = h.node.escrowMgr.GetEscrow(esc.ID)
 	}
 
+	// Determine if current user is buyer or seller
+	nodeID := r.URL.Query().Get("node_id")
+	if nodeID == "" {
+		nodeID = h.node.identity.NodeID()
+	}
+	isBuyer := esc.BuyerID == nodeID
+	isSeller := esc.SellerID == nodeID
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"escrow_id":       esc.ID,
@@ -2957,6 +3067,8 @@ func (h *Homepage) handleEscrowStatus(w http.ResponseWriter, r *http.Request) {
 		"listing_title":   esc.ListingTitle,
 		"buyer_id":        esc.BuyerID,
 		"seller_id":       esc.SellerID,
+		"is_buyer":        isBuyer,
+		"is_seller":       isSeller,
 		"currency":        esc.Currency,
 		"amount":          esc.Amount,
 		"payment_address": esc.EscrowAddress,
@@ -3008,6 +3120,52 @@ func (h *Homepage) handleEscrowPay(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleEscrowManualConfirm allows manual payment confirmation (for testing or when auto-detect fails)
+func (h *Homepage) handleEscrowManualConfirm(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	escrowID := r.FormValue("escrow_id")
+	txID := r.FormValue("tx_id") // Optional transaction ID for record
+
+	if h.node == nil || escrowID == "" {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	// Forward to bootstrap if not configured locally
+	if !h.node.cryptoWallet.IsConfigured() {
+		formData := url.Values{}
+		formData.Set("escrow_id", escrowID)
+		formData.Set("tx_id", txID)
+		resp, err := http.PostForm("http://203.161.33.237:8080/api/escrow/manual-confirm", formData)
+		if err != nil {
+			http.Error(w, "Failed to contact escrow service: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		defer resp.Body.Close()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+		return
+	}
+
+	// Manually mark escrow as funded
+	err := h.node.escrowMgr.ManualConfirmPayment(escrowID, txID)
+	if err != nil {
+		http.Error(w, "Failed to confirm payment: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "Payment manually confirmed. Order is now funded.",
+	})
+}
+
 func (h *Homepage) handleEscrowShip(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -3019,6 +3177,23 @@ func (h *Homepage) handleEscrowShip(w http.ResponseWriter, r *http.Request) {
 
 	if h.node == nil || escrowID == "" {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	// Forward to bootstrap if not configured locally
+	if !h.node.cryptoWallet.IsConfigured() {
+		formData := url.Values{}
+		formData.Set("escrow_id", escrowID)
+		formData.Set("tracking_info", trackingInfo)
+		resp, err := http.PostForm("http://203.161.33.237:8080/api/escrow/ship", formData)
+		if err != nil {
+			http.Error(w, "Failed to contact escrow service: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		defer resp.Body.Close()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
 		return
 	}
 
@@ -3045,6 +3220,22 @@ func (h *Homepage) handleEscrowRelease(w http.ResponseWriter, r *http.Request) {
 
 	if h.node == nil || escrowID == "" {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	// Forward to bootstrap if not configured locally
+	if !h.node.cryptoWallet.IsConfigured() {
+		formData := url.Values{}
+		formData.Set("escrow_id", escrowID)
+		resp, err := http.PostForm("http://203.161.33.237:8080/api/escrow/release", formData)
+		if err != nil {
+			http.Error(w, "Failed to contact escrow service: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		defer resp.Body.Close()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
 		return
 	}
 
@@ -3075,6 +3266,23 @@ func (h *Homepage) handleEscrowDispute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Forward to bootstrap if not configured locally
+	if !h.node.cryptoWallet.IsConfigured() {
+		formData := url.Values{}
+		formData.Set("escrow_id", escrowID)
+		formData.Set("reason", reason)
+		resp, err := http.PostForm("http://203.161.33.237:8080/api/escrow/dispute", formData)
+		if err != nil {
+			http.Error(w, "Failed to contact escrow service: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		defer resp.Body.Close()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+		return
+	}
+
 	err := h.node.escrowMgr.OpenDispute(escrowID, reason)
 	if err != nil {
 		http.Error(w, "Failed to open dispute: "+err.Error(), http.StatusBadRequest)
@@ -3096,11 +3304,32 @@ func (h *Homepage) handleMyEscrows(w http.ResponseWriter, r *http.Request) {
 
 	role := r.URL.Query().Get("role") // "buyer" or "seller"
 
+	// Forward to bootstrap if not configured locally
+	if !h.node.cryptoWallet.IsConfigured() {
+		bootstrapURL := "http://203.161.33.237:8080/api/escrow/my?role=" + url.QueryEscape(role) + "&node_id=" + url.QueryEscape(h.node.identity.NodeID())
+		resp, err := http.Get(bootstrapURL)
+		if err != nil {
+			http.Error(w, "Failed to contact escrow service: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		defer resp.Body.Close()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+		return
+	}
+
+	// For bootstrap, use node_id from query if provided (forwarded request)
+	nodeID := r.URL.Query().Get("node_id")
+	if nodeID == "" {
+		nodeID = h.node.identity.NodeID()
+	}
+
 	var escrows []*escrow.Escrow
 	if role == "seller" {
-		escrows = h.node.escrowMgr.GetSellerEscrows(h.node.identity.NodeID())
+		escrows = h.node.escrowMgr.GetSellerEscrows(nodeID)
 	} else {
-		escrows = h.node.escrowMgr.GetBuyerEscrows(h.node.identity.NodeID())
+		escrows = h.node.escrowMgr.GetBuyerEscrows(nodeID)
 	}
 
 	var results []map[string]interface{}
@@ -3110,6 +3339,50 @@ func (h *Homepage) handleMyEscrows(w http.ResponseWriter, r *http.Request) {
 			"order_id":      e.OrderID,
 			"listing_id":    e.ListingID,
 			"listing_title": e.ListingTitle,
+			"currency":      e.Currency,
+			"amount":        e.Amount,
+			"state":         e.State,
+			"created_at":    e.CreatedAt.Format(time.RFC3339),
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(results)
+}
+
+func (h *Homepage) handleAllEscrows(w http.ResponseWriter, r *http.Request) {
+	if h.node == nil {
+		http.Error(w, "Node not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Forward to bootstrap if not configured locally
+	if !h.node.cryptoWallet.IsConfigured() {
+		bootstrapURL := "http://203.161.33.237:8080/api/escrow/all"
+		resp, err := http.Get(bootstrapURL)
+		if err != nil {
+			http.Error(w, "Failed to contact escrow service: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		defer resp.Body.Close()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+		return
+	}
+
+	// Get all escrows (for admin/testing)
+	escrows := h.node.escrowMgr.GetAllEscrows()
+
+	var results []map[string]interface{}
+	for _, e := range escrows {
+		results = append(results, map[string]interface{}{
+			"escrow_id":     e.ID,
+			"order_id":      e.OrderID,
+			"listing_id":    e.ListingID,
+			"listing_title": e.ListingTitle,
+			"buyer_id":      e.BuyerID,
+			"seller_id":     e.SellerID,
 			"currency":      e.Currency,
 			"amount":        e.Amount,
 			"state":         e.State,
@@ -4651,6 +4924,7 @@ const marketplaceHTML = `<!DOCTYPE html>
                     <div class="tabs">
                         <button class="tab active" onclick="loadOrders('buying')">PURCHASES</button>
                         <button class="tab" onclick="loadOrders('selling')">SALES</button>
+                        <button class="tab" onclick="loadAllOrders()">ALL ORDERS</button>
                     </div>
                     <div id="orders-list"></div>
                 </div>
@@ -4741,6 +5015,12 @@ const marketplaceHTML = `<!DOCTYPE html>
                     </div>
                     <div style="margin-bottom:15px"><label>DESCRIPTION:</label><br><textarea id="new-desc" required style="width:100%"></textarea></div>
                     <div style="margin-bottom:15px"><label>IMAGE URL:</label><br><input type="text" id="new-image" placeholder="https://..." style="width:100%"></div>
+                    <div style="margin-bottom:15px;padding:10px;border:1px solid var(--amber);background:rgba(255,191,0,0.05)">
+                        <strong style="color:var(--amber)">PAYMENT ADDRESSES (to receive funds):</strong><br><br>
+                        <div style="margin-bottom:10px"><label>YOUR MONERO (XMR) ADDRESS:</label><br><input type="text" id="new-xmr-addr" placeholder="4..." style="width:100%"></div>
+                        <div><label>YOUR ZCASH (ZEC) ADDRESS:</label><br><input type="text" id="new-zec-addr" placeholder="zs1..." style="width:100%"></div>
+                        <small style="color:var(--amber)">Enter addresses for the currencies you accept</small>
+                    </div>
                     <button type="submit" class="btn">CREATE LISTING</button>
                 </form>
             </div>
@@ -5001,8 +5281,12 @@ const marketplaceHTML = `<!DOCTYPE html>
                 'After sending payment, click below to check status.<br>' +
                 'Requires ' + (escrow.currency === 'XMR' ? '10' : '6') + ' confirmations.' +
                 '</div>' +
-                '<div style="margin-top:20px">' +
+                '<div style="margin-top:20px;display:flex;gap:10px;flex-wrap:wrap;justify-content:center">' +
                 '<button class="btn" onclick="checkPaymentStatus(\'' + escrow.escrow_id + '\')">CHECK PAYMENT STATUS</button>' +
+                '<button class="btn" style="background:var(--amber);color:#000" onclick="manualConfirmPayment(\'' + escrow.escrow_id + '\')">MANUAL CONFIRM</button>' +
+                '</div>' +
+                '<div style="margin-top:10px;font-size:12px;color:var(--text-muted)">' +
+                'Use Manual Confirm if you verified payment in your wallet but auto-detect failed.' +
                 '</div>' +
                 '</div>';
             showModal('order-modal');
@@ -5023,6 +5307,33 @@ const marketplaceHTML = `<!DOCTYPE html>
             }
         }
         
+        async function manualConfirmPayment(escrowId) {
+            const txId = prompt('Enter the transaction ID (optional, for records):');
+            if (txId === null) return; // User cancelled
+            
+            const formData = new FormData();
+            formData.append('escrow_id', escrowId);
+            formData.append('tx_id', txId || '');
+            
+            try {
+                const res = await fetch('/api/escrow/manual-confirm', {
+                    method: 'POST',
+                    body: formData
+                });
+                const result = await res.json();
+                
+                if (result.success) {
+                    alert('Payment manually confirmed! The order is now funded.');
+                    closeModal('order-modal');
+                    loadOrders('buying');
+                } else {
+                    alert('Failed to confirm: ' + (result.message || 'Unknown error'));
+                }
+            } catch (err) {
+                alert('Error: ' + err.message);
+            }
+        }
+        
         function showMessageForm(sellerId, listingId) {
             document.getElementById('message-thread').innerHTML =
                 '<div id="msg-history" style="max-height:300px;overflow-y:auto;margin-bottom:15px;padding:10px;border:1px solid var(--border)"></div>' +
@@ -5039,6 +5350,44 @@ const marketplaceHTML = `<!DOCTYPE html>
             if (!content) return;
             alert('Message sent! In production, this would send via encrypted P2P messaging.');
             document.getElementById('msg-content').value = '';
+        }
+        
+        async function loadAllOrders() {
+            const res = await fetch('/api/escrow/all');
+            const orders = await res.json();
+            const container = document.getElementById('orders-list');
+            
+            if (!orders || orders.length === 0) {
+                container.innerHTML = 
+                    '<div class="order">' +
+                    '<div class="order-header"><span>No orders yet</span></div>' +
+                    '<p style="color:var(--green-dim)">All network orders will appear here.</p>' +
+                    '</div>';
+                return;
+            }
+            
+            container.innerHTML = orders.map(o => {
+                const stateColors = {
+                    'created': 'var(--green-dim)',
+                    'funded': 'var(--amber)',
+                    'shipped': 'var(--blue)',
+                    'completed': 'var(--green)',
+                    'disputed': 'var(--red)',
+                    'refunded': 'var(--amber)',
+                    'cancelled': 'var(--red)',
+                    'expired': 'var(--red)'
+                };
+                const stateColor = stateColors[o.state] || 'var(--green-dim)';
+                
+                return '<div class="order" onclick="showEscrowDetails(\'' + o.escrow_id + '\')" style="cursor:pointer">' +
+                    '<div class="order-header">' +
+                    '<span>' + (o.listing_title || 'Order') + '</span>' +
+                    '<span class="order-status" style="background:' + stateColor + ';color:#000">' + o.state.toUpperCase() + '</span>' +
+                    '</div>' +
+                    '<p>' + (o.amount ? o.amount.toFixed(6) : '0') + ' ' + (o.currency || 'XMR') + '</p>' +
+                    '<p style="color:var(--green-dim);font-size:12px">' + new Date(o.created_at).toLocaleDateString() + '</p>' +
+                    '</div>';
+            }).join('');
         }
         
         async function loadOrders(type) {
@@ -5084,16 +5433,50 @@ const marketplaceHTML = `<!DOCTYPE html>
             const res = await fetch('/api/escrow/status?id=' + escrowId);
             const e = await res.json();
             
+            // Determine if current user is buyer or seller
+            const isSeller = e.is_seller || false;
+            const isBuyer = e.is_buyer || false;
+            
             let actions = '';
-            if (e.state === 'funded') {
-                actions = '<button class="btn" onclick="markShipped(\'' + escrowId + '\')">MARK SHIPPED</button>';
+            let roleLabel = isSeller ? '[YOU ARE SELLER]' : (isBuyer ? '[YOU ARE BUYER]' : '');
+            
+            if (e.state === 'created') {
+                if (isBuyer) {
+                    actions = '<p style="color:var(--amber)">Waiting for payment. Send crypto to escrow address.</p>';
+                } else if (isSeller) {
+                    actions = '<p style="color:var(--amber)">Waiting for buyer to pay.</p>';
+                }
+            } else if (e.state === 'funded') {
+                if (isSeller) {
+                    actions = '<button class="btn" onclick="markShipped(\'' + escrowId + '\')">MARK AS SHIPPED</button>' +
+                        '<p style="margin-top:10px;color:var(--green-dim)">Ship the item, then mark as shipped.</p>';
+                } else if (isBuyer) {
+                    actions = '<p style="color:var(--amber)">Payment received. Waiting for seller to ship.</p>';
+                } else {
+                    // For "ALL ORDERS" view - show both options
+                    actions = '<button class="btn" onclick="markShipped(\'' + escrowId + '\')">MARK AS SHIPPED (Seller)</button>';
+                }
             } else if (e.state === 'shipped') {
-                actions = '<button class="btn" onclick="releaseEscrow(\'' + escrowId + '\')">CONFIRM RECEIVED</button>' +
-                    '<button class="btn btn-danger" style="margin-left:10px" onclick="openDispute(\'' + escrowId + '\')">OPEN DISPUTE</button>';
+                if (isBuyer) {
+                    actions = '<button class="btn" onclick="releaseEscrow(\'' + escrowId + '\')">CONFIRM RECEIVED</button>' +
+                        '<button class="btn btn-danger" style="margin-left:10px" onclick="openDispute(\'' + escrowId + '\')">OPEN DISPUTE</button>' +
+                        '<p style="margin-top:10px;color:var(--green-dim)">Click Confirm when you receive the item to release funds.</p>';
+                } else if (isSeller) {
+                    actions = '<p style="color:var(--amber)">Item shipped. Waiting for buyer to confirm receipt.</p>' +
+                        '<p style="color:var(--green-dim)">Auto-release in 14 days if buyer doesn\'t respond.</p>';
+                } else {
+                    // For "ALL ORDERS" view
+                    actions = '<button class="btn" onclick="releaseEscrow(\'' + escrowId + '\')">CONFIRM RECEIVED (Buyer)</button>';
+                }
+            } else if (e.state === 'completed') {
+                actions = '<p style="color:var(--green)">Transaction complete! Funds released to seller.</p>';
+            } else if (e.state === 'disputed') {
+                actions = '<p style="color:var(--red)">Dispute in progress. Funds frozen.</p>';
             }
             
             document.getElementById('order-form').innerHTML =
                 '<h2>' + e.listing_title + '</h2>' +
+                '<div style="padding:10px;background:var(--bg-darker);color:var(--amber);margin-bottom:15px">' + roleLabel + '</div>' +
                 '<div style="padding:20px;border:1px solid var(--border);margin:15px 0">' +
                 '<p><strong>Status:</strong> <span style="color:var(--amber)">' + e.state.toUpperCase() + '</span></p>' +
                 '<p><strong>Amount:</strong> ' + e.amount.toFixed(8) + ' ' + e.currency + '</p>' +
@@ -5101,7 +5484,7 @@ const marketplaceHTML = `<!DOCTYPE html>
                 (e.tx_id ? '<p><strong>TX ID:</strong> <span style="font-size:12px">' + e.tx_id + '</span></p>' : '') +
                 (e.tracking_info ? '<p><strong>Tracking:</strong> ' + e.tracking_info + '</p>' : '') +
                 '<p><strong>Created:</strong> ' + new Date(e.created_at).toLocaleString() + '</p>' +
-                (e.state === 'shipped' ? '<p><strong>Auto-release:</strong> ' + new Date(e.auto_release_at).toLocaleString() + '</p>' : '') +
+                (e.auto_release_at && e.state === 'shipped' ? '<p><strong>Auto-release:</strong> ' + new Date(e.auto_release_at).toLocaleString() + '</p>' : '') +
                 '</div>' +
                 '<div style="margin-top:20px">' + actions + '</div>';
             showModal('order-modal');
@@ -5202,6 +5585,18 @@ const marketplaceHTML = `<!DOCTYPE html>
             const currency = document.getElementById('new-currency').value;
             const desc = document.getElementById('new-desc').value;
             const image = document.getElementById('new-image').value;
+            const xmrAddr = document.getElementById('new-xmr-addr').value;
+            const zecAddr = document.getElementById('new-zec-addr').value;
+            
+            // Validate that seller has address for the currency they accept
+            if (currency === 'XMR' && !xmrAddr) {
+                alert('You must provide your Monero address to accept XMR payments');
+                return;
+            }
+            if (currency === 'ZEC' && !zecAddr) {
+                alert('You must provide your Zcash address to accept ZEC payments');
+                return;
+            }
             
             const formData = new FormData();
             formData.append('title', title);
@@ -5210,6 +5605,8 @@ const marketplaceHTML = `<!DOCTYPE html>
             formData.append('currency', currency);
             formData.append('description', desc);
             formData.append('image', image);
+            formData.append('seller_xmr_address', xmrAddr);
+            formData.append('seller_zec_address', zecAddr);
             
             try {
                 const res = await fetch('/api/create-listing', {

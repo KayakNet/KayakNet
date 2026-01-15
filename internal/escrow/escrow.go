@@ -336,6 +336,38 @@ func (m *EscrowManager) CheckPayment(escrowID string) (bool, error) {
 	return false, nil
 }
 
+// ManualConfirmPayment allows manual confirmation of payment (when auto-detect fails)
+func (m *EscrowManager) ManualConfirmPayment(escrowID, txID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	
+	escrow, ok := m.escrows[escrowID]
+	if !ok {
+		return ErrEscrowNotFound
+	}
+	
+	if escrow.State != StateCreated {
+		return ErrAlreadyFunded
+	}
+	
+	escrow.State = StateFunded
+	escrow.FundedAt = time.Now()
+	escrow.TxID = txID
+	
+	// Set auto-release timer (14 days after funding)
+	escrow.AutoReleaseAt = time.Now().Add(14 * 24 * time.Hour)
+	escrow.AutoReleaseEnabled = true
+	
+	// Save state
+	go m.Save()
+	
+	if m.onStateChange != nil {
+		m.onStateChange(escrow, StateFunded)
+	}
+	
+	return nil
+}
+
 // MarkShipped seller marks order as shipped
 func (m *EscrowManager) MarkShipped(escrowID, trackingInfo string) error {
 	m.mu.Lock()
@@ -558,6 +590,18 @@ func (m *EscrowManager) GetSellerEscrows(sellerID string) []*Escrow {
 		if e.SellerID == sellerID {
 			escrows = append(escrows, e)
 		}
+	}
+	return escrows
+}
+
+// GetAllEscrows returns all escrows (for admin/testing)
+func (m *EscrowManager) GetAllEscrows() []*Escrow {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	
+	var escrows []*Escrow
+	for _, e := range m.escrows {
+		escrows = append(escrows, e)
 	}
 	return escrows
 }

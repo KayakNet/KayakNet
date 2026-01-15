@@ -250,9 +250,18 @@ fun MarketScreen() {
     if (showCreateListing) {
         CreateListingDialog(
             onDismiss = { showCreateListing = false },
-            onCreate = { title, description, price, currency, category, imageData ->
+            onCreate = { title, description, price, currency, category, imageData, xmrAddr, zecAddr ->
                 scope.launch {
-                    client.createListing(title, description, price, currency, category, imageData)
+                    client.createListing(
+                        title = title, 
+                        description = description, 
+                        price = price, 
+                        currency = currency, 
+                        category = category, 
+                        imageData = imageData,
+                        sellerXmrAddress = xmrAddr,
+                        sellerZecAddress = zecAddr
+                    )
                     showCreateListing = false
                 }
             }
@@ -282,12 +291,22 @@ fun MarketScreen() {
             onDismiss = { showEscrows = false },
             onRelease = { escrowId ->
                 scope.launch {
-                    client.releaseEscrow(escrowId)
+                    client.confirmEscrowReceived(escrowId)
                 }
             },
             onDispute = { escrowId, reason ->
                 scope.launch {
                     client.disputeEscrow(escrowId, reason)
+                }
+            },
+            onMarkShipped = { escrowId, trackingInfo ->
+                scope.launch {
+                    client.markEscrowShipped(escrowId, trackingInfo)
+                }
+            },
+            onManualConfirm = { escrowId, txId ->
+                scope.launch {
+                    client.manualConfirmPayment(escrowId, txId)
                 }
             }
         )
@@ -372,7 +391,7 @@ fun ListingCard(
 @Composable
 fun CreateListingDialog(
     onDismiss: () -> Unit,
-    onCreate: (String, String, Double, String, String, String?) -> Unit
+    onCreate: (String, String, Double, String, String, String?, String?, String?) -> Unit
 ) {
     var title by remember { mutableStateOf("") }
     var description by remember { mutableStateOf("") }
@@ -380,6 +399,8 @@ fun CreateListingDialog(
     var currency by remember { mutableStateOf("XMR") }
     var category by remember { mutableStateOf("Digital Goods") }
     var imageData by remember { mutableStateOf<String?>(null) }
+    var xmrAddress by remember { mutableStateOf("") }
+    var zecAddress by remember { mutableStateOf("") }
     var isCreating by remember { mutableStateOf(false) }
     val context = LocalContext.current
     
@@ -446,7 +467,7 @@ fun CreateListingDialog(
                     OutlinedTextField(
                         value = price,
                         onValueChange = { price = it.filter { c -> c.isDigit() || c == '.' } },
-                        label = { Text("Price", color = Color(0xFF00FF00).copy(alpha = 0.7f)) },
+                        label = { Text("Price (USD)", color = Color(0xFF00FF00).copy(alpha = 0.7f)) },
                         modifier = Modifier.weight(1f),
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedBorderColor = Color(0xFF00FF00),
@@ -467,7 +488,7 @@ fun CreateListingDialog(
                             value = currency,
                             onValueChange = {},
                             readOnly = true,
-                            label = { Text("Currency", color = Color(0xFF00FF00).copy(alpha = 0.7f)) },
+                            label = { Text("Accept", color = Color(0xFF00FF00).copy(alpha = 0.7f)) },
                             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = currencyExpanded) },
                             modifier = Modifier.menuAnchor(),
                             colors = OutlinedTextFieldDefaults.colors(
@@ -482,7 +503,7 @@ fun CreateListingDialog(
                             onDismissRequest = { currencyExpanded = false },
                             modifier = Modifier.background(Color(0xFF0D0D0D))
                         ) {
-                            listOf("XMR", "ZEC").forEach { cur ->
+                            listOf("XMR", "ZEC", "BOTH").forEach { cur ->
                                 DropdownMenuItem(
                                     text = { Text(cur, color = Color(0xFF00FF00)) },
                                     onClick = {
@@ -535,7 +556,57 @@ fun CreateListingDialog(
                     }
                 }
                 
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                Text(
+                    "PAYOUT ADDRESSES",
+                    color = Color(0xFF00FF00),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    "Enter your wallet addresses to receive payment",
+                    color = Color(0xFF00FF00).copy(alpha = 0.5f),
+                    fontSize = 10.sp
+                )
+                
                 Spacer(modifier = Modifier.height(8.dp))
+                
+                if (currency == "XMR" || currency == "BOTH") {
+                    OutlinedTextField(
+                        value = xmrAddress,
+                        onValueChange = { xmrAddress = it },
+                        label = { Text("Monero (XMR) Address", color = Color(0xFF00FF00).copy(alpha = 0.7f)) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = Color(0xFFFF6600),
+                            unfocusedBorderColor = Color(0xFFFF6600).copy(alpha = 0.3f),
+                            cursorColor = Color(0xFFFF6600),
+                            focusedTextColor = Color(0xFF00FF00),
+                            unfocusedTextColor = Color(0xFF00FF00)
+                        )
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+                
+                if (currency == "ZEC" || currency == "BOTH") {
+                    OutlinedTextField(
+                        value = zecAddress,
+                        onValueChange = { zecAddress = it },
+                        label = { Text("Zcash (ZEC) Address", color = Color(0xFF00FF00).copy(alpha = 0.7f)) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = Color(0xFFFFD700),
+                            unfocusedBorderColor = Color(0xFFFFD700).copy(alpha = 0.3f),
+                            cursorColor = Color(0xFFFFD700),
+                            focusedTextColor = Color(0xFF00FF00),
+                            unfocusedTextColor = Color(0xFF00FF00)
+                        )
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
                 
                 OutlinedButton(
                     onClick = { imagePickerLauncher.launch("image/*") },
@@ -554,14 +625,30 @@ fun CreateListingDialog(
             }
         },
         confirmButton = {
+            val hasValidAddress = when (currency) {
+                "XMR" -> xmrAddress.isNotBlank()
+                "ZEC" -> zecAddress.isNotBlank()
+                "BOTH" -> xmrAddress.isNotBlank() || zecAddress.isNotBlank()
+                else -> true
+            }
+            
             Button(
                 onClick = {
-                    if (title.isNotBlank() && price.isNotBlank()) {
+                    if (title.isNotBlank() && price.isNotBlank() && hasValidAddress) {
                         isCreating = true
-                        onCreate(title, description, price.toDoubleOrNull() ?: 0.0, currency, category, imageData)
+                        onCreate(
+                            title, 
+                            description, 
+                            price.toDoubleOrNull() ?: 0.0, 
+                            if (currency == "BOTH") "XMR" else currency, 
+                            category, 
+                            imageData,
+                            xmrAddress.ifBlank { null },
+                            zecAddress.ifBlank { null }
+                        )
                     }
                 },
-                enabled = title.isNotBlank() && price.isNotBlank() && !isCreating,
+                enabled = title.isNotBlank() && price.isNotBlank() && hasValidAddress && !isCreating,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = Color(0xFF00FF00),
                     contentColor = Color.Black
@@ -669,84 +756,76 @@ fun EscrowsDialog(
     escrows: List<net.kayaknet.app.network.Escrow>,
     onDismiss: () -> Unit,
     onRelease: (String) -> Unit,
-    onDispute: (String, String) -> Unit
+    onDispute: (String, String) -> Unit,
+    onMarkShipped: (String, String) -> Unit = { _, _ -> },
+    onManualConfirm: (String, String) -> Unit = { _, _ -> }
 ) {
     var disputeReason by remember { mutableStateOf("") }
     var showDisputeFor by remember { mutableStateOf<String?>(null) }
+    var showShipFor by remember { mutableStateOf<String?>(null) }
+    var trackingInfo by remember { mutableStateOf("") }
+    var showManualConfirmFor by remember { mutableStateOf<String?>(null) }
+    var txId by remember { mutableStateOf("") }
+    var tabIndex by remember { mutableStateOf(0) } // 0 = Buying, 1 = Selling
+    
+    val buyingEscrows = escrows.filter { it.is_buyer }
+    val sellingEscrows = escrows.filter { it.is_seller }
     
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = Color(0xFF0D0D0D),
-        title = { Text("MY ESCROWS", color = Color(0xFF00FF00)) },
+        title = { Text("MY ORDERS", color = Color(0xFF00FF00)) },
         text = {
-            if (escrows.isEmpty()) {
-                Text("No active escrows", color = Color(0xFF00FF00).copy(alpha = 0.5f))
-            } else {
-                LazyColumn {
-                    items(escrows) { escrow ->
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 4.dp),
-                            colors = CardDefaults.cardColors(containerColor = Color(0xFF151515))
-                        ) {
-                            Column(modifier = Modifier.padding(12.dp)) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Text(
-                                        "${escrow.amount} ${escrow.currency}",
-                                        color = Color(0xFF00FFFF),
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                    Text(
-                                        escrow.status.uppercase(),
-                                        color = when (escrow.status) {
-                                            "pending" -> Color.Yellow
-                                            "funded" -> Color.Green
-                                            "released" -> Color.Cyan
-                                            "disputed" -> Color.Red
-                                            else -> Color.Gray
-                                        },
-                                        fontSize = 10.sp
-                                    )
-                                }
-                                
-                                Spacer(modifier = Modifier.height(4.dp))
-                                
-                                Text(
-                                    "ID: ${escrow.id.take(16)}...",
-                                    color = Color(0xFF00FF00).copy(alpha = 0.5f),
-                                    fontSize = 10.sp
-                                )
-                                
-                                if (escrow.status == "funded") {
-                                    Spacer(modifier = Modifier.height(8.dp))
-                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        Button(
-                                            onClick = { onRelease(escrow.id) },
-                                            colors = ButtonDefaults.buttonColors(
-                                                containerColor = Color.Green,
-                                                contentColor = Color.Black
-                                            ),
-                                            modifier = Modifier.weight(1f)
-                                        ) {
-                                            Text("RELEASE", fontSize = 10.sp)
-                                        }
-                                        Button(
-                                            onClick = { showDisputeFor = escrow.id },
-                                            colors = ButtonDefaults.buttonColors(
-                                                containerColor = Color.Red,
-                                                contentColor = Color.White
-                                            ),
-                                            modifier = Modifier.weight(1f)
-                                        ) {
-                                            Text("DISPUTE", fontSize = 10.sp)
-                                        }
-                                    }
-                                }
-                            }
+            Column {
+                // Tab selector
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FilterChip(
+                        selected = tabIndex == 0,
+                        onClick = { tabIndex = 0 },
+                        label = { Text("BUYING (${buyingEscrows.size})", fontSize = 10.sp) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = Color(0xFF00FF00),
+                            selectedLabelColor = Color.Black,
+                            containerColor = Color.Transparent,
+                            labelColor = Color(0xFF00FF00)
+                        )
+                    )
+                    FilterChip(
+                        selected = tabIndex == 1,
+                        onClick = { tabIndex = 1 },
+                        label = { Text("SELLING (${sellingEscrows.size})", fontSize = 10.sp) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = Color(0xFF00FF00),
+                            selectedLabelColor = Color.Black,
+                            containerColor = Color.Transparent,
+                            labelColor = Color(0xFF00FF00)
+                        )
+                    )
+                }
+                
+                Spacer(modifier = Modifier.height(8.dp))
+                
+                val displayEscrows = if (tabIndex == 0) buyingEscrows else sellingEscrows
+                
+                if (displayEscrows.isEmpty()) {
+                    Text(
+                        if (tabIndex == 0) "No purchases" else "No sales",
+                        color = Color(0xFF00FF00).copy(alpha = 0.5f)
+                    )
+                } else {
+                    LazyColumn(modifier = Modifier.height(300.dp)) {
+                        items(displayEscrows) { escrow ->
+                            EscrowCard(
+                                escrow = escrow,
+                                isSeller = tabIndex == 1,
+                                onRelease = onRelease,
+                                onDispute = { showDisputeFor = escrow.escrow_id.ifEmpty { escrow.id } },
+                                onMarkShipped = { showShipFor = escrow.escrow_id.ifEmpty { escrow.id } },
+                                onManualConfirm = { showManualConfirmFor = escrow.escrow_id.ifEmpty { escrow.id } }
+                            )
                         }
                     }
                 }
@@ -802,5 +881,305 @@ fun EscrowsDialog(
                 }
             }
         )
+    }
+    
+    // Ship dialog (for sellers)
+    if (showShipFor != null) {
+        AlertDialog(
+            onDismissRequest = { showShipFor = null },
+            containerColor = Color(0xFF0D0D0D),
+            title = { Text("MARK AS SHIPPED", color = Color(0xFF00FFFF)) },
+            text = {
+                OutlinedTextField(
+                    value = trackingInfo,
+                    onValueChange = { trackingInfo = it },
+                    label = { Text("Tracking Info (optional)", color = Color(0xFF00FF00).copy(alpha = 0.7f)) },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Color(0xFF00FFFF),
+                        unfocusedBorderColor = Color(0xFF00FFFF).copy(alpha = 0.3f),
+                        cursorColor = Color(0xFF00FFFF),
+                        focusedTextColor = Color(0xFF00FF00),
+                        unfocusedTextColor = Color(0xFF00FF00)
+                    )
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onMarkShipped(showShipFor!!, trackingInfo)
+                        showShipFor = null
+                        trackingInfo = ""
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF00FFFF),
+                        contentColor = Color.Black
+                    )
+                ) {
+                    Text("CONFIRM SHIPPED")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showShipFor = null }) {
+                    Text("CANCEL", color = Color(0xFF00FF00))
+                }
+            }
+        )
+    }
+    
+    // Manual confirm dialog
+    if (showManualConfirmFor != null) {
+        AlertDialog(
+            onDismissRequest = { showManualConfirmFor = null },
+            containerColor = Color(0xFF0D0D0D),
+            title = { Text("MANUAL PAYMENT CONFIRM", color = Color(0xFFFFD700)) },
+            text = {
+                Column {
+                    Text(
+                        "If payment was sent but not detected, enter the transaction ID:",
+                        color = Color(0xFF00FF00).copy(alpha = 0.7f),
+                        fontSize = 12.sp
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = txId,
+                        onValueChange = { txId = it },
+                        label = { Text("Transaction ID (TXID)", color = Color(0xFF00FF00).copy(alpha = 0.7f)) },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = Color(0xFFFFD700),
+                            unfocusedBorderColor = Color(0xFFFFD700).copy(alpha = 0.3f),
+                            cursorColor = Color(0xFFFFD700),
+                            focusedTextColor = Color(0xFF00FF00),
+                            unfocusedTextColor = Color(0xFF00FF00)
+                        )
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (txId.isNotBlank()) {
+                            onManualConfirm(showManualConfirmFor!!, txId)
+                            showManualConfirmFor = null
+                            txId = ""
+                        }
+                    },
+                    enabled = txId.isNotBlank(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFFFFD700),
+                        contentColor = Color.Black
+                    )
+                ) {
+                    Text("CONFIRM PAYMENT")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showManualConfirmFor = null }) {
+                    Text("CANCEL", color = Color(0xFF00FF00))
+                }
+            }
+        )
+    }
+}
+
+@Composable
+fun EscrowCard(
+    escrow: net.kayaknet.app.network.Escrow,
+    isSeller: Boolean,
+    onRelease: (String) -> Unit,
+    onDispute: () -> Unit,
+    onMarkShipped: () -> Unit,
+    onManualConfirm: () -> Unit
+) {
+    val escrowId = escrow.escrow_id.ifEmpty { escrow.id }
+    val state = escrow.state.ifEmpty { escrow.status }
+    
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF151515))
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            // Title and amount
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        escrow.listing_title.ifEmpty { "Order" },
+                        color = Color(0xFF00FF00),
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        "${String.format("%.6f", escrow.amount)} ${escrow.currency}",
+                        color = Color(0xFF00FFFF),
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp
+                    )
+                }
+                
+                // State badge
+                val stateColor = when (state.lowercase()) {
+                    "created" -> Color(0xFFFFD700)
+                    "funded" -> Color(0xFF00FF00)
+                    "shipped" -> Color(0xFF00FFFF)
+                    "completed" -> Color(0xFF00FF00)
+                    "disputed" -> Color.Red
+                    "refunded" -> Color.Gray
+                    else -> Color.Gray
+                }
+                Text(
+                    state.uppercase(),
+                    color = stateColor,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .background(stateColor.copy(alpha = 0.2f), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
+            
+            Spacer(modifier = Modifier.height(4.dp))
+            
+            Text(
+                "ID: ${escrowId.take(16)}...",
+                color = Color(0xFF00FF00).copy(alpha = 0.5f),
+                fontSize = 10.sp
+            )
+            
+            // Show payment address for created state
+            if (state.lowercase() == "created" && escrow.payment_address.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "Pay to: ${escrow.payment_address.take(20)}...",
+                    color = Color(0xFFFFD700),
+                    fontSize = 9.sp
+                )
+            }
+            
+            // Show tracking for shipped state
+            if (state.lowercase() == "shipped" && escrow.tracking_info.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "Tracking: ${escrow.tracking_info}",
+                    color = Color(0xFF00FFFF),
+                    fontSize = 10.sp
+                )
+            }
+            
+            Spacer(modifier = Modifier.height(8.dp))
+            
+            // Actions based on state and role
+            when (state.lowercase()) {
+                "created" -> {
+                    if (!isSeller) {
+                        // Buyer: show payment info and manual confirm option
+                        Text(
+                            "Waiting for payment...",
+                            color = Color(0xFFFFD700),
+                            fontSize = 10.sp
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Button(
+                            onClick = onManualConfirm,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFFFFD700),
+                                contentColor = Color.Black
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("MANUAL CONFIRM", fontSize = 10.sp)
+                        }
+                    } else {
+                        Text(
+                            "Waiting for buyer payment",
+                            color = Color(0xFFFFD700),
+                            fontSize = 10.sp
+                        )
+                    }
+                }
+                "funded" -> {
+                    if (isSeller) {
+                        // Seller: can mark as shipped
+                        Button(
+                            onClick = onMarkShipped,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFF00FFFF),
+                                contentColor = Color.Black
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("MARK AS SHIPPED", fontSize = 10.sp)
+                        }
+                    } else {
+                        Text(
+                            "Payment received. Waiting for seller to ship.",
+                            color = Color(0xFF00FF00),
+                            fontSize = 10.sp
+                        )
+                    }
+                }
+                "shipped" -> {
+                    if (!isSeller) {
+                        // Buyer: can confirm received or dispute
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = { onRelease(escrowId) },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color.Green,
+                                    contentColor = Color.Black
+                                ),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("RECEIVED", fontSize = 10.sp)
+                            }
+                            Button(
+                                onClick = onDispute,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color.Red,
+                                    contentColor = Color.White
+                                ),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("DISPUTE", fontSize = 10.sp)
+                            }
+                        }
+                    } else {
+                        Text(
+                            "Shipped. Waiting for buyer confirmation.",
+                            color = Color(0xFF00FFFF),
+                            fontSize = 10.sp
+                        )
+                        if (escrow.auto_release_at.isNotEmpty()) {
+                            Text(
+                                "Auto-release: ${escrow.auto_release_at.take(10)}",
+                                color = Color(0xFF00FF00).copy(alpha = 0.5f),
+                                fontSize = 9.sp
+                            )
+                        }
+                    }
+                }
+                "completed" -> {
+                    Text(
+                        "Transaction complete!",
+                        color = Color.Green,
+                        fontSize = 10.sp
+                    )
+                }
+                "disputed" -> {
+                    Text(
+                        "Dispute in progress",
+                        color = Color.Red,
+                        fontSize = 10.sp
+                    )
+                }
+            }
+        }
     }
 }

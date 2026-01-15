@@ -69,6 +69,10 @@ type Listing struct {
 	Rating      float64   `json:"rating"`
 	ReviewCount int64     `json:"review_count"`
 	Favorites   int64     `json:"favorites"`
+	
+	// Seller payment addresses (for receiving funds from escrow)
+	SellerXMRAddress string `json:"seller_xmr_address,omitempty"` // Monero address
+	SellerZECAddress string `json:"seller_zec_address,omitempty"` // Zcash address
 }
 
 // Review is a buyer's review of a listing/seller
@@ -437,11 +441,11 @@ func (m *Marketplace) GetLocalName() string {
 
 // CreateListing creates a new listing
 func (m *Marketplace) CreateListing(title, description, category string, price float64, currency string, ttl time.Duration) (*Listing, error) {
-	return m.CreateListingFull(title, description, category, price, currency, "", "", ttl)
+	return m.CreateListingFull(title, description, category, price, currency, "", "", "", "", ttl)
 }
 
 // CreateListingFull creates a new listing with all options
-func (m *Marketplace) CreateListingFull(title, description, category string, price float64, currency, image, sellerName string, ttl time.Duration) (*Listing, error) {
+func (m *Marketplace) CreateListingFull(title, description, category string, price float64, currency, image, sellerName, sellerXMRAddr, sellerZECAddr string, ttl time.Duration) (*Listing, error) {
 	if title == "" || price < 0 {
 		return nil, ErrInvalidListing
 	}
@@ -451,20 +455,22 @@ func (m *Marketplace) CreateListingFull(title, description, category string, pri
 	}
 
 	listing := &Listing{
-		ID:          generateID(),
-		Title:       title,
-		Description: description,
-		Category:    category,
-		Price:       price,
-		Currency:    currency,
-		Image:       image,
-		SellerID:    m.localID,
-		SellerName:  sellerName,
-		SellerKey:   m.localKey,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
-		ExpiresAt:   time.Now().Add(ttl),
-		Active:      true,
+		ID:               generateID(),
+		Title:            title,
+		Description:      description,
+		Category:         category,
+		Price:            price,
+		Currency:         currency,
+		Image:            image,
+		SellerID:         m.localID,
+		SellerName:       sellerName,
+		SellerKey:        m.localKey,
+		CreatedAt:        time.Now(),
+		UpdatedAt:        time.Now(),
+		ExpiresAt:        time.Now().Add(ttl),
+		Active:           true,
+		SellerXMRAddress: sellerXMRAddr,
+		SellerZECAddress: sellerZECAddr,
 	}
 
 	// Sign the listing

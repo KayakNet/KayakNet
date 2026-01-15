@@ -213,14 +213,14 @@ func Default() *Config {
 		},
 		Crypto: CryptoConfig{
 			Monero: MoneroConfig{
-				Enabled:  true,
-				RPCHost:  "127.0.0.1",
+				Enabled:  false,  // User nodes don't run crypto daemons
+				RPCHost:  "",     // Empty = forward to bootstrap
 				RPCPort:  18082,
 				Network:  "mainnet",
 			},
 			Zcash: ZcashConfig{
-				Enabled:  true,
-				RPCHost:  "127.0.0.1",
+				Enabled:  false,  // User nodes don't run crypto daemons
+				RPCHost:  "",     // Empty = forward to bootstrap
 				RPCPort:  8232,
 				Network:  "mainnet",
 			},
