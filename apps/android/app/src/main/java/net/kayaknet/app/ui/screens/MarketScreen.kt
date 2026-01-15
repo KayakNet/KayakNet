@@ -18,6 +18,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -36,12 +37,21 @@ import java.util.*
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MarketScreen() {
-    val client = KayakNetApp.instance.client
+    val client = remember { KayakNetApp.instance.client }
     val connectionState by client.connectionState.collectAsState()
     val listings by client.listings.collectAsState()
     val myEscrows by client.myEscrows.collectAsState()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    
+    // Fetch escrows on screen load
+    LaunchedEffect(Unit) {
+        try {
+            client.fetchMyEscrows()
+        } catch (e: Exception) {
+            // Ignore errors
+        }
+    }
     
     var searchQuery by remember { mutableStateOf("") }
     var selectedCategory by remember { mutableStateOf<String?>(null) }

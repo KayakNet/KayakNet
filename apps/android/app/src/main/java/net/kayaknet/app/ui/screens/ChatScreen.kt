@@ -42,7 +42,7 @@ import java.util.*
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun ChatScreen() {
-    val client = KayakNetApp.instance.client
+    val client = remember { KayakNetApp.instance.client }
     val connectionState by client.connectionState.collectAsState()
     val chatMessages by client.chatMessages.collectAsState()
     val chatRooms by client.chatRooms.collectAsState()
@@ -52,6 +52,7 @@ fun ChatScreen() {
     val onlineUsers by client.onlineUsers.collectAsState()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    var errorMessage by remember { mutableStateOf<String?>(null) }
     
     var messageText by remember { mutableStateOf("") }
     var currentRoom by remember { mutableStateOf("general") }
@@ -496,17 +497,27 @@ fun ChatScreen() {
                         onClick = {
                             if (messageText.isNotBlank() && !isSending) {
                                 isSending = true
+                                val msgToSend = messageText.trim()
+                                val replyId = replyToMessage?.id
                                 scope.launch {
-                                    val success = if (currentDM != null) {
-                                        client.sendDM(currentDM!!, messageText.trim(), replyToMessage?.id)
-                                    } else {
-                                        client.sendChatMessage(currentRoom, messageText.trim(), replyToMessage?.id)
+                                    try {
+                                        val success = if (currentDM != null) {
+                                            client.sendDM(currentDM!!, msgToSend, replyId)
+                                        } else {
+                                            client.sendChatMessage(currentRoom, msgToSend, replyId)
+                                        }
+                                        if (success) {
+                                            messageText = ""
+                                            replyToMessage = null
+                                            errorMessage = null
+                                        } else {
+                                            errorMessage = "Failed to send message"
+                                        }
+                                    } catch (e: Exception) {
+                                        errorMessage = "Error: ${e.message}"
+                                    } finally {
+                                        isSending = false
                                     }
-                                    if (success) {
-                                        messageText = ""
-                                        replyToMessage = null
-                                    }
-                                    isSending = false
                                 }
                             }
                         },

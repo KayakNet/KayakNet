@@ -26,7 +26,7 @@ import java.util.*
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DomainsScreen() {
-    val client = KayakNetApp.instance.client
+    val client = remember { KayakNetApp.instance.client }
     val connectionState by client.connectionState.collectAsState()
     val domains by client.domains.collectAsState()
     val myDomains by client.myDomains.collectAsState()

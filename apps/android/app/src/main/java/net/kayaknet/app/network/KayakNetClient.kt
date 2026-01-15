@@ -9,6 +9,8 @@ import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -264,31 +266,35 @@ class KayakNetClient(private val context: Context) {
     }
     
     suspend fun sendChatMessage(room: String, message: String, replyTo: String? = null): Boolean {
-        return try {
-            val formBuilder = FormBody.Builder()
-                .add("room", room)
-                .add("message", message)
-            
-            replyTo?.let { formBuilder.add("reply_to", it) }
-            
-            val request = Request.Builder()
-                .url("http://$bootstrapHost:$bootstrapPort/api/chat")
-                .post(formBuilder.build())
-                .build()
-            
-            httpClient.newCall(request).execute().use { response ->
-                if (response.isSuccessful) {
-                    delay(100)
-                    fetchChatHistory(room)
-                    true
-                } else {
-                    Log.e(TAG, "sendChatMessage failed: ${response.code}")
-                    false
+        return withContext(Dispatchers.IO) {
+            try {
+                val formBuilder = FormBody.Builder()
+                    .add("room", room)
+                    .add("message", message)
+                    .add("nick", getLocalNick())
+                    .add("sender_id", nodeId)
+                
+                replyTo?.let { formBuilder.add("reply_to", it) }
+                
+                val request = Request.Builder()
+                    .url("http://$bootstrapHost:$bootstrapPort/api/chat")
+                    .post(formBuilder.build())
+                    .build()
+                
+                httpClient.newCall(request).execute().use { response ->
+                    val success = response.isSuccessful
+                    if (success) {
+                        delay(200)
+                        fetchChatHistory(room)
+                    } else {
+                        Log.e(TAG, "sendChatMessage failed: ${response.code} - ${response.body?.string()}")
+                    }
+                    success
                 }
+            } catch (e: Exception) {
+                Log.e(TAG, "sendChatMessage error: ${e.message}", e)
+                false
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "sendChatMessage error: ${e.message}")
-            false
         }
     }
     
@@ -389,29 +395,36 @@ class KayakNetClient(private val context: Context) {
     suspend fun sendDM(userId: String, message: String, replyTo: String? = null): Boolean {
         if (_blockedUsers.value.contains(userId)) return false
         
-        return try {
-            val formBuilder = FormBody.Builder()
-                .add("user", userId)
-                .add("message", message)
-            
-            replyTo?.let { formBuilder.add("reply_to", it) }
-            
-            val request = Request.Builder()
-                .url("http://$bootstrapHost:$bootstrapPort/api/chat/dm")
-                .post(formBuilder.build())
-                .build()
-            
-            httpClient.newCall(request).execute().use { response ->
-                if (response.isSuccessful) {
-                    delay(100)
-                    fetchDMMessages(userId)
-                    fetchConversations()
-                    true
-                } else false
+        return withContext(Dispatchers.IO) {
+            try {
+                val formBuilder = FormBody.Builder()
+                    .add("user", userId)
+                    .add("message", message)
+                    .add("nick", getLocalNick())
+                    .add("sender_id", nodeId)
+                
+                replyTo?.let { formBuilder.add("reply_to", it) }
+                
+                val request = Request.Builder()
+                    .url("http://$bootstrapHost:$bootstrapPort/api/chat/dm")
+                    .post(formBuilder.build())
+                    .build()
+                
+                httpClient.newCall(request).execute().use { response ->
+                    val success = response.isSuccessful
+                    if (success) {
+                        delay(200)
+                        fetchDMMessages(userId)
+                        fetchConversations()
+                    } else {
+                        Log.e(TAG, "sendDM failed: ${response.code}")
+                    }
+                    success
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "sendDM error: ${e.message}", e)
+                false
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "sendDM error: ${e.message}")
-            false
         }
     }
     
