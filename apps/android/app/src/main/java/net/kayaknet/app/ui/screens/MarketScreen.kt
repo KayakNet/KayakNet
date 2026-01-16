@@ -329,6 +329,13 @@ fun MarketScreen() {
             },
             onMessageSeller = {
                 // Navigate to DM
+            },
+            onViewOrders = {
+                // Close listing dialog and open escrows
+                selectedListing = null
+                buyError = null
+                buySuccess = false
+                showEscrows = true
             }
         )
     }
@@ -733,7 +740,8 @@ fun ListingDetailDialog(
     onMessageSeller: () -> Unit,
     isBuying: Boolean = false,
     buyError: String? = null,
-    buySuccess: Boolean = false
+    buySuccess: Boolean = false,
+    onViewOrders: () -> Unit = {}
 ) {
     AlertDialog(
         onDismissRequest = { if (!isBuying) onDismiss() },
@@ -826,7 +834,7 @@ fun ListingDetailDialog(
         confirmButton = {
             if (buySuccess) {
                 Button(
-                    onClick = onDismiss,
+                    onClick = onViewOrders,
                     colors = ButtonDefaults.buttonColors(
                         containerColor = Color(0xFF00FF00),
                         contentColor = Color.Black
