@@ -3,7 +3,7 @@
 A privacy-first peer-to-peer network with built-in anonymity. No central servers. No web services. Just nodes talking directly to each other through encrypted, anonymous channels.
 
 ```
-    ┌─────────┐         ┌─────────┐
+i    ┌─────────┐         ┌─────────┐
     │  Node   │◄───────►│  Node   │
     │  Alpha  │  relay  │  Beta   │
     └────┬────┘         └────┬────┘
