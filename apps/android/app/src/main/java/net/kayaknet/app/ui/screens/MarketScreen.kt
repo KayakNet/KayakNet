@@ -355,21 +355,37 @@ fun MarketScreen() {
             onRelease = { escrowId ->
                 scope.launch {
                     client.confirmEscrowReceived(escrowId)
+                    client.fetchMyEscrows()
                 }
             },
             onDispute = { escrowId, reason ->
                 scope.launch {
                     client.disputeEscrow(escrowId, reason)
+                    client.fetchMyEscrows()
                 }
             },
             onMarkShipped = { escrowId, trackingInfo ->
                 scope.launch {
                     client.markEscrowShipped(escrowId, trackingInfo)
+                    client.fetchMyEscrows()
                 }
             },
             onManualConfirm = { escrowId, txId ->
                 scope.launch {
                     client.manualConfirmPayment(escrowId, txId)
+                    client.fetchMyEscrows()
+                }
+            },
+            onCheckStatus = { escrowId ->
+                scope.launch {
+                    val status = client.getEscrowStatus(escrowId)
+                    // Status is updated in the escrow list automatically
+                    client.fetchMyEscrows()
+                }
+            },
+            onRefresh = {
+                scope.launch {
+                    client.fetchMyEscrows()
                 }
             }
         )
@@ -1026,7 +1042,9 @@ fun EscrowsDialog(
     onRelease: (String) -> Unit,
     onDispute: (String, String) -> Unit,
     onMarkShipped: (String, String) -> Unit = { _, _ -> },
-    onManualConfirm: (String, String) -> Unit = { _, _ -> }
+    onManualConfirm: (String, String) -> Unit = { _, _ -> },
+    onCheckStatus: (String) -> Unit = { _ -> },
+    onRefresh: () -> Unit = {}
 ) {
     var disputeReason by remember { mutableStateOf("") }
     var showDisputeFor by remember { mutableStateOf<String?>(null) }
@@ -1035,6 +1053,7 @@ fun EscrowsDialog(
     var showManualConfirmFor by remember { mutableStateOf<String?>(null) }
     var txId by remember { mutableStateOf("") }
     var tabIndex by remember { mutableStateOf(0) } // 0 = Buying, 1 = Selling
+    var statusMessage by remember { mutableStateOf<String?>(null) }
     
     val buyingEscrows = escrows.filter { it.is_buyer }
     val sellingEscrows = escrows.filter { it.is_seller }
@@ -1078,6 +1097,19 @@ fun EscrowsDialog(
                 
                 val displayEscrows = if (tabIndex == 0) buyingEscrows else sellingEscrows
                 
+                // Status message
+                statusMessage?.let { msg ->
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFF1A1A1A), RoundedCornerShape(4.dp))
+                            .padding(8.dp)
+                    ) {
+                        Text(msg, color = Color(0xFFFFD700), fontSize = 11.sp)
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+                
                 if (displayEscrows.isEmpty()) {
                     Text(
                         if (tabIndex == 0) "No purchases" else "No sales",
@@ -1092,7 +1124,11 @@ fun EscrowsDialog(
                                 onRelease = onRelease,
                                 onDispute = { showDisputeFor = escrow.escrow_id.ifEmpty { escrow.id } },
                                 onMarkShipped = { showShipFor = escrow.escrow_id.ifEmpty { escrow.id } },
-                                onManualConfirm = { showManualConfirmFor = escrow.escrow_id.ifEmpty { escrow.id } }
+                                onManualConfirm = { showManualConfirmFor = escrow.escrow_id.ifEmpty { escrow.id } },
+                                onCheckStatus = {
+                                    onCheckStatus(escrow.escrow_id.ifEmpty { escrow.id })
+                                    statusMessage = "Checking status..."
+                                }
                             )
                         }
                     }
@@ -1100,8 +1136,16 @@ fun EscrowsDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text("CLOSE", color = Color(0xFF00FF00))
+            Row {
+                TextButton(onClick = {
+                    onRefresh()
+                    statusMessage = "Refreshing..."
+                }) {
+                    Text("REFRESH", color = Color(0xFF00FFFF))
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("CLOSE", color = Color(0xFF00FF00))
+                }
             }
         }
     )
@@ -1258,11 +1302,15 @@ fun EscrowCard(
     onRelease: (String) -> Unit,
     onDispute: () -> Unit,
     onMarkShipped: () -> Unit,
-    onManualConfirm: () -> Unit
+    onManualConfirm: () -> Unit,
+    onCheckStatus: () -> Unit = {},
+    onShowPaymentDetails: () -> Unit = {}
 ) {
     val escrowId = try { escrow.escrow_id.ifEmpty { escrow.id } } catch (e: Exception) { "unknown" }
     val state = try { escrow.state.ifEmpty { escrow.status }.ifEmpty { "unknown" } } catch (e: Exception) { "unknown" }
-    val amountDisplay = try { "%.6f".format(escrow.amount) } catch (e: Exception) { escrow.amount.toString() }
+    val amountDisplay = try { "%.8f".format(escrow.amount) } catch (e: Exception) { escrow.amount.toString() }
+    val clipboardManager = LocalClipboardManager.current
+    var addressCopied by remember { mutableStateOf(false) }
     
     Card(
         modifier = Modifier
@@ -1301,6 +1349,7 @@ fun EscrowCard(
                     "completed" -> Color(0xFF00FF00)
                     "disputed" -> Color.Red
                     "refunded" -> Color.Gray
+                    "expired" -> Color.Gray
                     else -> Color.Gray
                 }
                 Text(
@@ -1317,19 +1366,48 @@ fun EscrowCard(
             Spacer(modifier = Modifier.height(4.dp))
             
             Text(
-                "ID: ${escrowId.take(16)}...",
+                "Order: ${escrow.order_id.ifEmpty { escrowId }.take(16)}...",
                 color = Color(0xFF00FF00).copy(alpha = 0.5f),
                 fontSize = 10.sp
             )
             
-            // Show payment address for created state
-            if (state.lowercase() == "created" && escrow.payment_address.isNotEmpty()) {
+            // Show payment address for created state with copy button
+            val paymentAddr = escrow.payment_address.ifEmpty { escrow.address }
+            if (state.lowercase() == "created" && paymentAddr.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("Send payment to:", color = Color(0xFFFFD700), fontSize = 10.sp)
                 Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    "Pay to: ${escrow.payment_address.take(20)}...",
-                    color = Color(0xFFFFD700),
-                    fontSize = 9.sp
-                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF0A0A0A), RoundedCornerShape(4.dp))
+                        .clickable {
+                            clipboardManager.setText(AnnotatedString(paymentAddr))
+                            addressCopied = true
+                        }
+                        .padding(8.dp)
+                ) {
+                    Text(
+                        paymentAddr,
+                        color = Color(0xFF00FFFF),
+                        fontSize = 8.sp,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                TextButton(
+                    onClick = {
+                        clipboardManager.setText(AnnotatedString(paymentAddr))
+                        addressCopied = true
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        if (addressCopied) "✓ COPIED!" else "TAP TO COPY ADDRESS",
+                        color = if (addressCopied) Color(0xFF00FF00) else Color(0xFFFFD700),
+                        fontSize = 10.sp
+                    )
+                }
             }
             
             // Show tracking for shipped state
@@ -1342,29 +1420,62 @@ fun EscrowCard(
                 )
             }
             
+            // Show TX ID if available
+            if (escrow.tx_id.isNotEmpty()) {
+                Text(
+                    "TX: ${escrow.tx_id.take(20)}...",
+                    color = Color(0xFF00FF00).copy(alpha = 0.5f),
+                    fontSize = 9.sp
+                )
+            }
+            
+            // Show auto-release time for shipped orders
+            if (state.lowercase() == "shipped" && escrow.auto_release_at.isNotEmpty()) {
+                Text(
+                    "Auto-release: ${escrow.auto_release_at.take(19)}",
+                    color = Color(0xFF00FF00).copy(alpha = 0.5f),
+                    fontSize = 9.sp
+                )
+            }
+            
             Spacer(modifier = Modifier.height(8.dp))
             
             // Actions based on state and role
             when (state.lowercase()) {
                 "created" -> {
                     if (!isSeller) {
-                        // Buyer: show payment info and manual confirm option
-                        Text(
-                            "Waiting for payment...",
-                            color = Color(0xFFFFD700),
-                            fontSize = 10.sp
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Button(
-                            onClick = onManualConfirm,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFFFFD700),
-                                contentColor = Color.Black
-                            ),
-                            modifier = Modifier.fillMaxWidth()
+                        // Buyer: show check status and manual confirm options
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Text("MANUAL CONFIRM", fontSize = 10.sp)
+                            Button(
+                                onClick = onCheckStatus,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFF333333),
+                                    contentColor = Color(0xFF00FF00)
+                                ),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("CHECK STATUS", fontSize = 9.sp)
+                            }
+                            Button(
+                                onClick = onManualConfirm,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFFFFD700),
+                                    contentColor = Color.Black
+                                ),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("MANUAL CONFIRM", fontSize = 9.sp)
+                            }
                         }
+                        Text(
+                            "After sending crypto, use Manual Confirm if auto-detect fails",
+                            color = Color(0xFF00FF00).copy(alpha = 0.5f),
+                            fontSize = 8.sp,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
                     } else {
                         Text(
                             "Waiting for buyer payment",
