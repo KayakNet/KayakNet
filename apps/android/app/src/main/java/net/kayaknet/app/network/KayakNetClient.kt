@@ -879,28 +879,57 @@ class KayakNetClient(private val context: Context) {
     }
     
     suspend fun fetchMyEscrows() {
-        try {
-            val request = Request.Builder()
-                .url("http://$bootstrapHost:$bootstrapPort/api/escrow/my?node_id=$nodeId")
-                .build()
-            
-            httpClient.newCall(request).execute().use { response ->
-                if (response.isSuccessful) {
-                    val body = response.body?.string() ?: "[]"
-                    val type = object : TypeToken<List<Escrow>>() {}.type
-                    val escrows: List<Escrow> = gson.fromJson(body, type) ?: emptyList()
-                    
-                    // Set is_buyer and is_seller based on current node
-                    _myEscrows.value = escrows.map { escrow ->
-                        escrow.copy(
-                            is_buyer = escrow.buyer_id == nodeId,
-                            is_seller = escrow.seller_id == nodeId
-                        )
+        withContext(Dispatchers.IO) {
+            try {
+                val allEscrows = mutableListOf<Escrow>()
+                
+                // Fetch buyer escrows
+                val buyerRequest = Request.Builder()
+                    .url("http://$bootstrapHost:$bootstrapPort/api/escrow/my?node_id=$nodeId&role=buyer")
+                    .build()
+                
+                httpClient.newCall(buyerRequest).execute().use { response ->
+                    if (response.isSuccessful) {
+                        val body = response.body?.string() ?: "[]"
+                        Log.d(TAG, "Buyer escrows: $body")
+                        val type = object : TypeToken<List<Escrow>>() {}.type
+                        val escrows: List<Escrow> = gson.fromJson(body, type) ?: emptyList()
+                        allEscrows.addAll(escrows.map { it.copy(is_buyer = true, is_seller = false) })
                     }
                 }
+                
+                // Fetch seller escrows
+                val sellerRequest = Request.Builder()
+                    .url("http://$bootstrapHost:$bootstrapPort/api/escrow/my?node_id=$nodeId&role=seller")
+                    .build()
+                
+                httpClient.newCall(sellerRequest).execute().use { response ->
+                    if (response.isSuccessful) {
+                        val body = response.body?.string() ?: "[]"
+                        Log.d(TAG, "Seller escrows: $body")
+                        val type = object : TypeToken<List<Escrow>>() {}.type
+                        val escrows: List<Escrow> = gson.fromJson(body, type) ?: emptyList()
+                        // Add only if not already present (avoid duplicates if same node is buyer and seller)
+                        for (escrow in escrows) {
+                            if (allEscrows.none { it.escrow_id == escrow.escrow_id || it.id == escrow.id }) {
+                                allEscrows.add(escrow.copy(is_buyer = false, is_seller = true))
+                            } else {
+                                // Update existing to mark as both buyer and seller
+                                val index = allEscrows.indexOfFirst { it.escrow_id == escrow.escrow_id || it.id == escrow.id }
+                                if (index >= 0) {
+                                    allEscrows[index] = allEscrows[index].copy(is_seller = true)
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                Log.d(TAG, "Total escrows: ${allEscrows.size}")
+                _myEscrows.value = allEscrows
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "fetchMyEscrows error: ${e.message}")
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "fetchMyEscrows error: ${e.message}")
         }
     }
     
