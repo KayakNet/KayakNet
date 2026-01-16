@@ -22,7 +22,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -75,6 +77,7 @@ fun MarketScreen() {
     var isBuying by remember { mutableStateOf(false) }
     var buyError by remember { mutableStateOf<String?>(null) }
     var buySuccess by remember { mutableStateOf(false) }
+    var createdEscrow by remember { mutableStateOf<net.kayaknet.app.network.Escrow?>(null) }
     
     val categories = listOf(
         "All", "Digital Goods", "Services", "Physical", "Art", "Software", "Other"
@@ -302,10 +305,12 @@ fun MarketScreen() {
                 selectedListing = null 
                 buyError = null
                 buySuccess = false
+                createdEscrow = null
             },
             isBuying = isBuying,
             buyError = buyError,
             buySuccess = buySuccess,
+            createdEscrow = createdEscrow,
             onBuy = { amount, currency ->
                 isBuying = true
                 buyError = null
@@ -313,6 +318,7 @@ fun MarketScreen() {
                     try {
                         val result = client.createEscrow(listing.id, amount, currency)
                         if (result.isSuccess) {
+                            createdEscrow = result.getOrNull()
                             buySuccess = true
                             buyError = null
                             // Refresh escrows
@@ -335,6 +341,7 @@ fun MarketScreen() {
                 selectedListing = null
                 buyError = null
                 buySuccess = false
+                createdEscrow = null
                 showEscrows = true
             }
         )
@@ -741,8 +748,11 @@ fun ListingDetailDialog(
     isBuying: Boolean = false,
     buyError: String? = null,
     buySuccess: Boolean = false,
+    createdEscrow: net.kayaknet.app.network.Escrow? = null,
     onViewOrders: () -> Unit = {}
 ) {
+    val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
     AlertDialog(
         onDismissRequest = { if (!isBuying) onDismiss() },
         containerColor = Color(0xFF0D0D0D),
@@ -755,8 +765,134 @@ fun ListingDetailDialog(
         },
         text = {
             Column {
-                if (buySuccess) {
-                    // Show success message
+                if (buySuccess && createdEscrow != null) {
+                    // Show payment details
+                    val paymentAddress = createdEscrow.payment_address.ifEmpty { createdEscrow.address }
+                    var copied by remember { mutableStateOf(false) }
+                    
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState()),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Icon(
+                            Icons.Filled.Check,
+                            contentDescription = "Success",
+                            tint = Color(0xFF00FF00),
+                            modifier = Modifier.size(32.dp)
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            "PAYMENT REQUIRED",
+                            color = Color(0xFFFFAA00),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp
+                        )
+                        
+                        Spacer(modifier = Modifier.height(12.dp))
+                        
+                        // Amount to send
+                        Text("Send exactly:", color = Color(0xFF00FF00).copy(alpha = 0.7f), fontSize = 12.sp)
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .border(2.dp, Color(0xFF00FF00), RoundedCornerShape(8.dp))
+                                .padding(12.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                "${String.format("%.8f", createdEscrow.amount)} ${createdEscrow.currency}",
+                                color = Color(0xFF00FF00),
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 20.sp
+                            )
+                        }
+                        
+                        Spacer(modifier = Modifier.height(12.dp))
+                        
+                        // Payment address
+                        Text("To address:", color = Color(0xFF00FF00).copy(alpha = 0.7f), fontSize = 12.sp)
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color(0xFF1A1A1A), RoundedCornerShape(8.dp))
+                                .clickable {
+                                    clipboardManager.setText(AnnotatedString(paymentAddress))
+                                    copied = true
+                                }
+                                .padding(12.dp)
+                        ) {
+                            Text(
+                                paymentAddress.ifEmpty { "Address not available" },
+                                color = Color(0xFF00FFFF),
+                                fontSize = 10.sp,
+                                maxLines = 4,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        
+                        // Copy button
+                        Button(
+                            onClick = {
+                                clipboardManager.setText(AnnotatedString(paymentAddress))
+                                copied = true
+                            },
+                            modifier = Modifier.padding(top = 8.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (copied) Color(0xFF00AA00) else Color(0xFF333333),
+                                contentColor = Color(0xFF00FF00)
+                            )
+                        ) {
+                            Text(if (copied) "COPIED!" else "COPY ADDRESS")
+                        }
+                        
+                        Spacer(modifier = Modifier.height(12.dp))
+                        
+                        // Order details
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalAlignment = Alignment.Start
+                        ) {
+                            Text(
+                                "Order ID: ${createdEscrow.order_id.ifEmpty { createdEscrow.escrow_id }}",
+                                color = Color(0xFF00FF00).copy(alpha = 0.5f),
+                                fontSize = 10.sp
+                            )
+                            if (createdEscrow.fee_percent > 0) {
+                                Text(
+                                    "Fee: ${createdEscrow.fee_percent}% (${String.format("%.8f", createdEscrow.fee_amount)} ${createdEscrow.currency})",
+                                    color = Color(0xFF00FF00).copy(alpha = 0.5f),
+                                    fontSize = 10.sp
+                                )
+                            }
+                            if (createdEscrow.expires_at.isNotEmpty()) {
+                                Text(
+                                    "Expires: ${createdEscrow.expires_at}",
+                                    color = Color(0xFF00FF00).copy(alpha = 0.5f),
+                                    fontSize = 10.sp
+                                )
+                            }
+                        }
+                        
+                        Spacer(modifier = Modifier.height(12.dp))
+                        
+                        // Instructions
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .border(1.dp, Color(0xFFFFAA00), RoundedCornerShape(8.dp))
+                                .padding(12.dp)
+                        ) {
+                            Text(
+                                "After sending payment, check your orders to track status.\nRequires ${if (createdEscrow.currency == "XMR") "10" else "6"} confirmations.",
+                                color = Color(0xFFFFAA00),
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                } else if (buySuccess) {
+                    // Fallback if no escrow details
                     Column(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalAlignment = Alignment.CenterHorizontally
@@ -767,14 +903,12 @@ fun ListingDetailDialog(
                             tint = Color(0xFF00FF00),
                             modifier = Modifier.size(48.dp)
                         )
-                        Spacer(modifier = Modifier.height(8.dp))
                         Text(
                             "ORDER CREATED!",
                             color = Color(0xFF00FF00),
                             fontWeight = FontWeight.Bold,
                             fontSize = 16.sp
                         )
-                        Spacer(modifier = Modifier.height(8.dp))
                         Text(
                             "Check your orders to see payment details",
                             color = Color(0xFF00FF00).copy(alpha = 0.7f),

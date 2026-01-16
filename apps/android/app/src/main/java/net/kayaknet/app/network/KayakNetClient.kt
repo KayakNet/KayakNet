@@ -1380,7 +1380,12 @@ data class Escrow(
     val created_at: String = "",
     val funded_at: String = "",
     val shipped_at: String = "",
+    val expires_at: String = "",
     val auto_release_at: String = "",
+    val fee_percent: Double = 5.0,
+    val fee_amount: Double = 0.0,
     val is_buyer: Boolean = false,
-    val is_seller: Boolean = false
+    val is_seller: Boolean = false,
+    val success: Boolean = false,
+    val message: String = ""
 )
