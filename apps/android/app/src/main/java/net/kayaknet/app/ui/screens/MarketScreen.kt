@@ -311,12 +311,18 @@ fun MarketScreen() {
             buyError = buyError,
             buySuccess = buySuccess,
             createdEscrow = createdEscrow,
-            onBuy = { amount, currency ->
+            onBuy = { amount, currency, refundAddr, deliveryInfo ->
                 isBuying = true
                 buyError = null
                 scope.launch {
                     try {
-                        val result = client.createEscrow(listing.id, amount, currency)
+                        val result = client.createEscrow(
+                            listingId = listing.id, 
+                            amount = amount, 
+                            currency = currency,
+                            buyerRefundAddress = refundAddr,
+                            deliveryInfo = deliveryInfo
+                        )
                         if (result.isSuccess) {
                             createdEscrow = result.getOrNull()
                             buySuccess = true
@@ -755,11 +761,12 @@ fun CreateListingDialog(
     )
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ListingDetailDialog(
     listing: Listing,
     onDismiss: () -> Unit,
-    onBuy: (Double, String) -> Unit,
+    onBuy: (Double, String, String, String) -> Unit, // price, currency, refundAddr, deliveryInfo
     onMessageSeller: () -> Unit,
     isBuying: Boolean = false,
     buyError: String? = null,
@@ -769,9 +776,18 @@ fun ListingDetailDialog(
 ) {
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
+    
+    // Order form state
+    var selectedCurrency by remember { mutableStateOf(listing.currency.ifEmpty { "XMR" }) }
+    var refundAddress by remember { mutableStateOf("") }
+    var deliveryInfo by remember { mutableStateOf("") }
+    var showOrderForm by remember { mutableStateOf(false) }
+    var currencyExpanded by remember { mutableStateOf(false) }
+    
     AlertDialog(
         onDismissRequest = { if (!isBuying) onDismiss() },
         containerColor = Color(0xFF0D0D0D),
+        modifier = Modifier.fillMaxWidth(),
         title = { 
             Text(
                 listing.title.ifEmpty { "Listing" },
@@ -780,7 +796,7 @@ fun ListingDetailDialog(
             )
         },
         text = {
-            Column {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
                 if (buySuccess && createdEscrow != null) {
                     // Show payment details
                     val paymentAddress = createdEscrow.payment_address.ifEmpty { createdEscrow.address }
@@ -931,7 +947,133 @@ fun ListingDetailDialog(
                             fontSize = 12.sp
                         )
                     }
+                } else if (showOrderForm) {
+                    // ORDER FORM
+                    Text(
+                        "PLACE ORDER",
+                        color = Color(0xFFFFAA00),
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp
+                    )
+                    
+                    Spacer(modifier = Modifier.height(12.dp))
+                    
+                    // Price display
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFF1A1A1A), RoundedCornerShape(8.dp))
+                            .padding(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(listing.title, color = Color(0xFF00FF00), fontSize = 12.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                            Text("${listing.price} USD", color = Color(0xFF00FFFF), fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    
+                    Spacer(modifier = Modifier.height(12.dp))
+                    
+                    // Currency selection
+                    Text("PAYMENT METHOD:", color = Color(0xFF00FF00).copy(alpha = 0.7f), fontSize = 11.sp)
+                    ExposedDropdownMenuBox(
+                        expanded = currencyExpanded,
+                        onExpandedChange = { currencyExpanded = it }
+                    ) {
+                        OutlinedTextField(
+                            value = if (selectedCurrency == "XMR") "MONERO (XMR) - Maximum Privacy" else "ZCASH (ZEC) - Shielded",
+                            onValueChange = {},
+                            readOnly = true,
+                            modifier = Modifier.fillMaxWidth().menuAnchor(),
+                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = currencyExpanded) },
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = Color(0xFF00FF00),
+                                unfocusedBorderColor = Color(0xFF00FF00).copy(alpha = 0.3f),
+                                focusedTextColor = Color(0xFF00FF00),
+                                unfocusedTextColor = Color(0xFF00FF00)
+                            )
+                        )
+                        ExposedDropdownMenu(
+                            expanded = currencyExpanded,
+                            onDismissRequest = { currencyExpanded = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("MONERO (XMR) - Maximum Privacy") },
+                                onClick = { selectedCurrency = "XMR"; currencyExpanded = false }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("ZCASH (ZEC) - Shielded") },
+                                onClick = { selectedCurrency = "ZEC"; currencyExpanded = false }
+                            )
+                        }
+                    }
+                    
+                    Spacer(modifier = Modifier.height(12.dp))
+                    
+                    // Refund address
+                    Text("YOUR REFUND ADDRESS (optional):", color = Color(0xFF00FF00).copy(alpha = 0.7f), fontSize = 11.sp)
+                    OutlinedTextField(
+                        value = refundAddress,
+                        onValueChange = { refundAddress = it },
+                        placeholder = { Text("Your $selectedCurrency address for refunds...", color = Color(0xFF00FF00).copy(alpha = 0.3f), fontSize = 12.sp) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = Color(0xFF00FF00),
+                            unfocusedBorderColor = Color(0xFF00FF00).copy(alpha = 0.3f),
+                            cursorColor = Color(0xFF00FF00),
+                            focusedTextColor = Color(0xFF00FF00),
+                            unfocusedTextColor = Color(0xFF00FF00)
+                        )
+                    )
+                    
+                    Spacer(modifier = Modifier.height(12.dp))
+                    
+                    // Delivery info
+                    Text("DELIVERY INFO (encrypted):", color = Color(0xFF00FF00).copy(alpha = 0.7f), fontSize = 11.sp)
+                    OutlinedTextField(
+                        value = deliveryInfo,
+                        onValueChange = { deliveryInfo = it },
+                        placeholder = { Text("Shipping address, email, or delivery instructions...", color = Color(0xFF00FF00).copy(alpha = 0.3f), fontSize = 12.sp) },
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 3,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = Color(0xFF00FF00),
+                            unfocusedBorderColor = Color(0xFF00FF00).copy(alpha = 0.3f),
+                            cursorColor = Color(0xFF00FF00),
+                            focusedTextColor = Color(0xFF00FF00),
+                            unfocusedTextColor = Color(0xFF00FF00)
+                        )
+                    )
+                    
+                    Spacer(modifier = Modifier.height(12.dp))
+                    
+                    // Escrow info box
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(1.dp, Color(0xFFFFAA00), RoundedCornerShape(8.dp))
+                            .padding(12.dp)
+                    ) {
+                        Column {
+                            Text("ESCROW PROTECTION", color = Color(0xFFFFAA00), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text("• Funds held securely until you confirm receipt", color = Color(0xFFFFAA00), fontSize = 10.sp)
+                            Text("• 5% escrow fee", color = Color(0xFFFFAA00), fontSize = 10.sp)
+                            Text("• 14-day auto-release after shipping", color = Color(0xFFFFAA00), fontSize = 10.sp)
+                        }
+                    }
+                    
+                    // Show error if any
+                    buyError?.let { error ->
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text("Error: $error", color = Color.Red, fontSize = 12.sp)
+                    }
+                    
                 } else {
+                    // LISTING DETAILS VIEW
                     Text(
                         listing.description.ifEmpty { "No description available" },
                         color = Color(0xFF00FF00).copy(alpha = 0.9f)
@@ -960,23 +1102,34 @@ fun ListingDetailDialog(
                     
                     Spacer(modifier = Modifier.height(16.dp))
                     
+                    // Seller info
                     Text("Seller", color = Color(0xFF00FF00).copy(alpha = 0.5f), fontSize = 10.sp)
                     val sellerDisplay = listing.sellerName.let { name ->
-                        if (name.isNullOrEmpty()) listing.seller.take(16) else name
+                        if (name.isNullOrEmpty()) listing.seller.take(16) + "..." else name
                     }
-                    Text(
-                        sellerDisplay,
-                        color = Color(0xFF00FF00)
-                    )
+                    Text(sellerDisplay, color = Color(0xFF00FF00))
                     
-                    // Show error if any
-                    buyError?.let { error ->
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            "Error: $error",
-                            color = Color.Red,
-                            fontSize = 12.sp
-                        )
+                    // Show accepted currencies
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("Accepts", color = Color(0xFF00FF00).copy(alpha = 0.5f), fontSize = 10.sp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (!listing.seller_xmr_address.isNullOrEmpty()) {
+                            Text("XMR", color = Color(0xFFFF6600), fontSize = 12.sp, 
+                                modifier = Modifier.background(Color(0xFFFF6600).copy(alpha = 0.2f), RoundedCornerShape(4.dp)).padding(horizontal = 6.dp, vertical = 2.dp))
+                        }
+                        if (!listing.seller_zec_address.isNullOrEmpty()) {
+                            Text("ZEC", color = Color(0xFFFFD700), fontSize = 12.sp,
+                                modifier = Modifier.background(Color(0xFFFFD700).copy(alpha = 0.2f), RoundedCornerShape(4.dp)).padding(horizontal = 6.dp, vertical = 2.dp))
+                        }
+                        if (listing.seller_xmr_address.isNullOrEmpty() && listing.seller_zec_address.isNullOrEmpty()) {
+                            Text("XMR / ZEC", color = Color(0xFF00FF00), fontSize = 12.sp)
+                        }
+                    }
+                    
+                    // Show stock if available
+                    if (listing.stock >= 0) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("Stock: ${listing.stock}", color = if (listing.stock > 0) Color(0xFF00FF00) else Color.Red, fontSize = 12.sp)
                     }
                 }
             }
@@ -992,10 +1145,10 @@ fun ListingDetailDialog(
                 ) {
                     Text("VIEW ORDERS")
                 }
-            } else {
+            } else if (showOrderForm) {
                 Button(
-                    onClick = { onBuy(listing.price, listing.currency.ifEmpty { "XMR" }) },
-                    enabled = !isBuying,
+                    onClick = { onBuy(listing.price, selectedCurrency, refundAddress, deliveryInfo) },
+                    enabled = !isBuying && deliveryInfo.isNotBlank(),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = Color(0xFF00FF00),
                         contentColor = Color.Black
@@ -1008,14 +1161,29 @@ fun ListingDetailDialog(
                             strokeWidth = 2.dp
                         )
                     } else {
-                        Text("BUY NOW")
+                        Text("CONFIRM ORDER")
                     }
+                }
+            } else {
+                Button(
+                    onClick = { showOrderForm = true },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF00FF00),
+                        contentColor = Color.Black
+                    )
+                ) {
+                    Text("BUY NOW")
                 }
             }
         },
         dismissButton = {
             if (!buySuccess) {
                 Row {
+                    if (showOrderForm) {
+                        TextButton(onClick = { showOrderForm = false }) {
+                            Text("BACK", color = Color(0xFF00FF00))
+                        }
+                    }
                     TextButton(
                         onClick = onMessageSeller,
                         enabled = !isBuying

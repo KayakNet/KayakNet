@@ -62,6 +62,9 @@ class KayakNetClient(private val context: Context) {
     private val _listings = MutableStateFlow<List<Listing>>(emptyList())
     val listings: StateFlow<List<Listing>> = _listings
     
+    private val _myListings = MutableStateFlow<List<Listing>>(emptyList())
+    val myListings: StateFlow<List<Listing>> = _myListings
+    
     private val _domains = MutableStateFlow<List<Domain>>(emptyList())
     val domains: StateFlow<List<Domain>> = _domains
     
@@ -823,9 +826,35 @@ class KayakNetClient(private val context: Context) {
         return _listings.value.find { it.id == listingId }
     }
     
+    suspend fun fetchMyListings() {
+        withContext(Dispatchers.IO) {
+            try {
+                val request = Request.Builder()
+                    .url("http://$bootstrapHost:$bootstrapPort/api/my-listings?seller_id=$nodeId")
+                    .build()
+                
+                httpClient.newCall(request).execute().use { response ->
+                    if (response.isSuccessful) {
+                        val body = response.body?.string() ?: "[]"
+                        val type = object : TypeToken<List<Listing>>() {}.type
+                        _myListings.value = gson.fromJson(body, type) ?: emptyList()
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "fetchMyListings error: ${e.message}")
+            }
+        }
+    }
+    
     // ===== ESCROW FEATURES =====
     
-    suspend fun createEscrow(listingId: String, amount: Double, currency: String): Result<Escrow> {
+    suspend fun createEscrow(
+        listingId: String, 
+        amount: Double, 
+        currency: String,
+        buyerRefundAddress: String = "",
+        deliveryInfo: String = "Mobile App Order"
+    ): Result<Escrow> {
         return withContext(Dispatchers.IO) {
             try {
                 // Get listing details to forward to server
@@ -835,8 +864,8 @@ class KayakNetClient(private val context: Context) {
                     .add("listing_id", listingId)
                     .add("currency", currency.ifEmpty { "XMR" })
                     .add("buyer", nodeId)
-                    .add("buyer_address", "") // Empty for now, can be added later
-                    .add("delivery_info", "Mobile App Order")
+                    .add("buyer_address", buyerRefundAddress)
+                    .add("delivery_info", deliveryInfo.ifEmpty { "Mobile App Order" })
                 
                 // If we have listing details, send them so server doesn't need to look up
                 if (listing != null) {
