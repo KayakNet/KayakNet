@@ -826,31 +826,55 @@ class KayakNetClient(private val context: Context) {
     // ===== ESCROW FEATURES =====
     
     suspend fun createEscrow(listingId: String, amount: Double, currency: String): Result<Escrow> {
-        return try {
-            val formBody = FormBody.Builder()
-                .add("listing_id", listingId)
-                .add("amount", amount.toString())
-                .add("currency", currency)
-                .add("buyer", nodeId)
-                .build()
-            
-            val request = Request.Builder()
-                .url("http://$bootstrapHost:$bootstrapPort/api/escrow/create")
-                .post(formBody)
-                .build()
-            
-            httpClient.newCall(request).execute().use { response ->
-                if (response.isSuccessful) {
-                    val body = response.body?.string() ?: "{}"
-                    val escrow = gson.fromJson(body, Escrow::class.java)
-                    fetchMyEscrows()
-                    Result.success(escrow)
-                } else {
-                    Result.failure(Exception("Failed to create escrow"))
+        return withContext(Dispatchers.IO) {
+            try {
+                // Get listing details to forward to server
+                val listing = _listings.value.find { it.id == listingId }
+                
+                val formBuilder = FormBody.Builder()
+                    .add("listing_id", listingId)
+                    .add("currency", currency.ifEmpty { "XMR" })
+                    .add("buyer", nodeId)
+                    .add("buyer_address", "") // Empty for now, can be added later
+                    .add("delivery_info", "Mobile App Order")
+                
+                // If we have listing details, send them so server doesn't need to look up
+                if (listing != null) {
+                    formBuilder.add("seller_id", listing.seller)
+                    formBuilder.add("listing_title", listing.title)
+                    formBuilder.add("amount", listing.price.toString())
+                    
+                    // Send seller crypto address based on currency
+                    val sellerAddress = if (currency == "ZEC") {
+                        listing.seller_zec_address ?: ""
+                    } else {
+                        listing.seller_xmr_address ?: ""
+                    }
+                    formBuilder.add("seller_address", sellerAddress)
                 }
+                
+                val request = Request.Builder()
+                    .url("http://$bootstrapHost:$bootstrapPort/api/escrow/create")
+                    .post(formBuilder.build())
+                    .build()
+                
+                httpClient.newCall(request).execute().use { response ->
+                    if (response.isSuccessful) {
+                        val body = response.body?.string() ?: "{}"
+                        Log.d(TAG, "createEscrow response: $body")
+                        val escrow = gson.fromJson(body, Escrow::class.java)
+                        fetchMyEscrows()
+                        Result.success(escrow)
+                    } else {
+                        val errorBody = response.body?.string() ?: "Unknown error"
+                        Log.e(TAG, "createEscrow failed: $errorBody")
+                        Result.failure(Exception(errorBody))
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "createEscrow exception: ${e.message}")
+                Result.failure(e)
             }
-        } catch (e: Exception) {
-            Result.failure(e)
         }
     }
     

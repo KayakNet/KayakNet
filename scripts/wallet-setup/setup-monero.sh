@@ -146,3 +146,4 @@ echo ""
 warn "IMPORTANT: Back up your wallet seed phrase from $WALLET_DIR"
 echo ""
 
+

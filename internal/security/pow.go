@@ -445,3 +445,4 @@ func (pm *PoWManager) String() string {
 		pm.difficulty, len(pm.verifiedNodes), len(pm.pendingProofs))
 }
 
+

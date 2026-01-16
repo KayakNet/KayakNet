@@ -196,3 +196,4 @@ warn "IMPORTANT: The blockchain will take time to sync before transactions work"
 warn "You can check sync status with: zcash-cli -datadir=$DATA_DIR getblockchaininfo"
 echo ""
 
+

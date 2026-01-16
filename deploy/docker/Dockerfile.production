@@ -59,3 +59,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
 ENTRYPOINT ["/opt/kayaknet/kayakd"]
 CMD ["--config", "/etc/kayaknet/config.json"]
 
+
