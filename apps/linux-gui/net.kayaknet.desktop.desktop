@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=KayakNet
+Comment=Anonymous encrypted network for private communication and commerce
+Exec=kayaknet-gui
+Icon=kayaknet
+Terminal=false
+Type=Application
+Categories=Network;InstantMessaging;Security;
+Keywords=anonymous;encrypted;chat;marketplace;privacy;
+StartupNotify=true
+StartupWMClass=net.kayaknet.desktop
+
