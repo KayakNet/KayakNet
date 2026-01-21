@@ -1,24 +1,10 @@
 #!/usr/bin/env python3
 """
 KayakNet Desktop GUI for Linux
-A native GTK4 + WebKit application that runs KayakNet with a beautiful interface.
+A native GTK application that runs KayakNet with a beautiful interface.
+Supports both GTK4 and GTK3 for maximum compatibility.
 """
 
-import gi
-gi.require_version('Gtk', '4.0')
-gi.require_version('Adw', '1')
-
-# Try WebKit 6.0 first, fall back to WebKit2 4.1
-try:
-    gi.require_version('WebKit', '6.0')
-    from gi.repository import WebKit
-    WEBKIT_VERSION = 6
-except ValueError:
-    gi.require_version('WebKit2', '4.1')
-    from gi.repository import WebKit2 as WebKit
-    WEBKIT_VERSION = 4
-
-from gi.repository import Gtk, Adw, GLib, Gio, Gdk
 import subprocess
 import threading
 import os
@@ -27,7 +13,24 @@ import signal
 import urllib.request
 import stat
 import json
+import webbrowser
 from pathlib import Path
+
+# Try GTK4 first, fall back to GTK3
+try:
+    import gi
+    gi.require_version('Gtk', '4.0')
+    gi.require_version('Adw', '1')
+    from gi.repository import Gtk, Adw, GLib, Gio, Gdk
+    GTK_VERSION = 4
+    print("Using GTK4 with Adwaita")
+except (ValueError, ImportError):
+    import gi
+    gi.require_version('Gtk', '3.0')
+    from gi.repository import Gtk, GLib, Gio, Gdk
+    GTK_VERSION = 3
+    Adw = None
+    print("Using GTK3 (fallback)")
 
 APP_ID = "net.kayaknet.desktop"
 APP_NAME = "KayakNet"
@@ -37,6 +40,7 @@ BOOTSTRAP_SERVERS = [
     "203.161.33.237:8080",
     "144.172.94.195:8080"
 ]
+
 
 class KayakNetDaemon:
     """Manages the KayakNet daemon process"""
@@ -49,7 +53,6 @@ class KayakNetDaemon:
         
     def _get_binary_path(self):
         """Get path to kayaknet binary"""
-        # Check common locations
         locations = [
             Path.home() / ".kayaknet" / "kayakd",
             Path("/usr/local/bin/kayakd"),
@@ -72,26 +75,24 @@ class KayakNetDaemon:
         
         try:
             if progress_callback:
-                progress_callback("Downloading KayakNet binary...")
+                GLib.idle_add(progress_callback, "Downloading KayakNet binary...")
             
             self.data_dir.mkdir(exist_ok=True)
             urllib.request.urlretrieve(url, self.binary_path)
-            
-            # Make executable
             self.binary_path.chmod(self.binary_path.stat().st_mode | stat.S_IEXEC)
             
             if progress_callback:
-                progress_callback("Download complete!")
+                GLib.idle_add(progress_callback, "Download complete!")
             return True
         except Exception as e:
             if progress_callback:
-                progress_callback(f"Download failed: {e}")
+                GLib.idle_add(progress_callback, f"Download failed: {e}")
             return False
     
     def start(self, bootstrap=None):
         """Start the KayakNet daemon"""
         if self.process and self.process.poll() is None:
-            return True  # Already running
+            return True
         
         if not self.binary_path.exists():
             return False
@@ -129,352 +130,405 @@ class KayakNetDaemon:
     def is_running(self):
         """Check if daemon is running"""
         return self.process is not None and self.process.poll() is None
-    
-    def get_output(self):
-        """Get daemon output (non-blocking)"""
-        if not self.process:
-            return None
-        try:
-            return self.process.stdout.readline().decode('utf-8', errors='ignore')
-        except:
-            return None
 
 
-class KayakNetWindow(Adw.ApplicationWindow):
-    """Main application window"""
+# ===================== GTK4 VERSION =====================
+if GTK_VERSION == 4:
     
-    def __init__(self, app):
-        super().__init__(application=app, title=APP_NAME)
-        self.set_default_size(1200, 800)
+    class KayakNetWindow(Adw.ApplicationWindow):
+        """Main application window (GTK4)"""
         
-        self.daemon = KayakNetDaemon()
-        self.setup_ui()
-        self.start_daemon()
-        
-    def setup_ui(self):
-        """Setup the UI components"""
-        # Main box
-        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self.set_content(main_box)
-        
-        # Header bar
-        header = Adw.HeaderBar()
-        
-        # Title
-        title = Adw.WindowTitle(title="KayakNet", subtitle="Anonymous Network")
-        header.set_title_widget(title)
-        
-        # Status indicator
-        self.status_box = Gtk.Box(spacing=6)
-        self.status_icon = Gtk.Image.new_from_icon_name("network-offline-symbolic")
-        self.status_label = Gtk.Label(label="Connecting...")
-        self.status_box.append(self.status_icon)
-        self.status_box.append(self.status_label)
-        header.pack_start(self.status_box)
-        
-        # Menu button
-        menu_button = Gtk.MenuButton()
-        menu_button.set_icon_name("open-menu-symbolic")
-        
-        # Create menu
-        menu = Gio.Menu()
-        menu.append("Refresh", "app.refresh")
-        menu.append("Copy Node ID", "app.copy_node_id")
-        menu.append("Settings", "app.settings")
-        menu.append("About", "app.about")
-        menu.append("Quit", "app.quit")
-        menu_button.set_menu_model(menu)
-        header.pack_end(menu_button)
-        
-        # Navigation buttons
-        nav_box = Gtk.Box(spacing=0)
-        nav_box.add_css_class("linked")
-        
-        self.nav_buttons = {}
-        pages = [
-            ("Home", "go-home-symbolic", "/"),
-            ("Chat", "user-available-symbolic", "/chat"),
-            ("Market", "emblem-shopping-symbolic", "/market"),
-            ("Domains", "network-server-symbolic", "/domains"),
-        ]
-        
-        for name, icon, path in pages:
-            btn = Gtk.ToggleButton()
-            btn.set_icon_name(icon)
-            btn.set_tooltip_text(name)
-            btn.connect("toggled", self.on_nav_clicked, path)
-            nav_box.append(btn)
-            self.nav_buttons[path] = btn
-        
-        self.nav_buttons["/"].set_active(True)
-        header.pack_start(nav_box)
-        
-        main_box.append(header)
-        
-        # Stack for content
-        self.stack = Gtk.Stack()
-        self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
-        
-        # Loading page
-        loading_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=20)
-        loading_box.set_valign(Gtk.Align.CENTER)
-        loading_box.set_halign(Gtk.Align.CENTER)
-        
-        spinner = Gtk.Spinner()
-        spinner.set_size_request(64, 64)
-        spinner.start()
-        loading_box.append(spinner)
-        
-        self.loading_label = Gtk.Label(label="Starting KayakNet...")
-        self.loading_label.add_css_class("title-2")
-        loading_box.append(self.loading_label)
-        
-        self.stack.add_named(loading_box, "loading")
-        
-        # WebView page
-        self.webview = WebKit.WebView()
-        self.webview.set_vexpand(True)
-        self.webview.set_hexpand(True)
-        
-        # Configure WebView settings
-        settings = self.webview.get_settings()
-        settings.set_enable_javascript(True)
-        settings.set_enable_developer_extras(True)
-        settings.set_javascript_can_access_clipboard(True)
-        
-        # Dark mode
-        self.webview.set_background_color(Gdk.RGBA(red=0, green=0, blue=0, alpha=1))
-        
-        self.webview.connect("load-changed", self.on_load_changed)
-        self.webview.connect("load-failed", self.on_load_failed)
-        
-        self.stack.add_named(self.webview, "webview")
-        
-        # Error page
-        error_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=20)
-        error_box.set_valign(Gtk.Align.CENTER)
-        error_box.set_halign(Gtk.Align.CENTER)
-        
-        error_icon = Gtk.Image.new_from_icon_name("dialog-error-symbolic")
-        error_icon.set_pixel_size(64)
-        error_box.append(error_icon)
-        
-        self.error_label = Gtk.Label(label="Failed to connect")
-        self.error_label.add_css_class("title-2")
-        error_box.append(self.error_label)
-        
-        retry_btn = Gtk.Button(label="Retry")
-        retry_btn.add_css_class("suggested-action")
-        retry_btn.connect("clicked", lambda _: self.start_daemon())
-        error_box.append(retry_btn)
-        
-        self.stack.add_named(error_box, "error")
-        
-        self.stack.set_visible_child_name("loading")
-        main_box.append(self.stack)
-        
-        # Apply custom CSS
-        self.apply_css()
-    
-    def apply_css(self):
-        """Apply custom CSS styling"""
-        css = b"""
-        window {
-            background-color: #0a0a0a;
-        }
-        headerbar {
-            background-color: #111111;
-            border-bottom: 1px solid #00ff0033;
-        }
-        .linked button {
-            background-color: transparent;
-            color: #00ff00;
-            border: none;
-        }
-        .linked button:checked {
-            background-color: #00ff0022;
-        }
-        .linked button:hover {
-            background-color: #00ff0011;
-        }
-        label {
-            color: #00ff00;
-        }
-        .title-2 {
-            font-size: 18px;
-            font-weight: bold;
-        }
-        """
-        
-        provider = Gtk.CssProvider()
-        provider.load_from_data(css)
-        Gtk.StyleContext.add_provider_for_display(
-            Gdk.Display.get_default(),
-            provider,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
-        )
-    
-    def on_nav_clicked(self, button, path):
-        """Handle navigation button clicks"""
-        if button.get_active():
-            # Deactivate other buttons
-            for p, btn in self.nav_buttons.items():
-                if p != path:
-                    btn.set_active(False)
+        def __init__(self, app):
+            super().__init__(application=app, title=APP_NAME)
+            self.set_default_size(500, 600)
             
-            # Navigate
-            self.webview.load_uri(f"http://127.0.0.1:8080{path}")
-    
-    def on_load_changed(self, webview, event):
-        """Handle WebView load events"""
-        if event == WebKit.LoadEvent.FINISHED:
-            self.stack.set_visible_child_name("webview")
-            self.update_status(True)
-    
-    def on_load_failed(self, webview, event, uri, error):
-        """Handle WebView load failures"""
-        self.error_label.set_text(f"Failed to load: {error.message}")
-        self.stack.set_visible_child_name("error")
-        self.update_status(False)
-        return True
-    
-    def update_status(self, connected):
-        """Update the connection status indicator"""
-        if connected:
-            self.status_icon.set_from_icon_name("network-transmit-receive-symbolic")
-            self.status_label.set_text("Connected")
-            self.status_icon.add_css_class("success")
-        else:
-            self.status_icon.set_from_icon_name("network-offline-symbolic")
-            self.status_label.set_text("Disconnected")
-            self.status_icon.remove_css_class("success")
-    
-    def start_daemon(self):
-        """Start the KayakNet daemon"""
-        self.stack.set_visible_child_name("loading")
-        self.loading_label.set_text("Starting KayakNet...")
+            self.daemon = KayakNetDaemon()
+            self.setup_ui()
+            self.start_daemon()
+            
+        def setup_ui(self):
+            """Setup the UI components"""
+            main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            self.set_content(main_box)
+            
+            # Header bar
+            header = Adw.HeaderBar()
+            title = Adw.WindowTitle(title="KayakNet", subtitle="Anonymous Network")
+            header.set_title_widget(title)
+            main_box.append(header)
+            
+            # Content
+            content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=20)
+            content.set_margin_top(40)
+            content.set_margin_bottom(40)
+            content.set_margin_start(40)
+            content.set_margin_end(40)
+            content.set_valign(Gtk.Align.CENTER)
+            content.set_halign(Gtk.Align.CENTER)
+            
+            # Logo/Title
+            logo_label = Gtk.Label(label="🛶")
+            logo_label.add_css_class("title-1")
+            logo_label.set_markup("<span size='72000'>🛶</span>")
+            content.append(logo_label)
+            
+            title_label = Gtk.Label(label="KayakNet")
+            title_label.add_css_class("title-1")
+            content.append(title_label)
+            
+            subtitle_label = Gtk.Label(label="Anonymous • Encrypted • Unstoppable")
+            subtitle_label.add_css_class("dim-label")
+            content.append(subtitle_label)
+            
+            # Status
+            self.status_box = Gtk.Box(spacing=10)
+            self.status_box.set_halign(Gtk.Align.CENTER)
+            self.status_box.set_margin_top(20)
+            
+            self.spinner = Gtk.Spinner()
+            self.spinner.set_size_request(24, 24)
+            self.status_box.append(self.spinner)
+            
+            self.status_label = Gtk.Label(label="Starting...")
+            self.status_box.append(self.status_label)
+            content.append(self.status_box)
+            
+            # Buttons
+            button_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+            button_box.set_margin_top(30)
+            button_box.set_halign(Gtk.Align.CENTER)
+            
+            self.open_btn = Gtk.Button(label="Open KayakNet")
+            self.open_btn.add_css_class("suggested-action")
+            self.open_btn.add_css_class("pill")
+            self.open_btn.set_size_request(200, -1)
+            self.open_btn.connect("clicked", self.on_open_clicked)
+            self.open_btn.set_sensitive(False)
+            button_box.append(self.open_btn)
+            
+            # Quick links
+            links_box = Gtk.Box(spacing=10)
+            links_box.set_halign(Gtk.Align.CENTER)
+            links_box.set_margin_top(10)
+            
+            for name, path in [("Chat", "/chat"), ("Market", "/market"), ("Domains", "/domains")]:
+                btn = Gtk.Button(label=name)
+                btn.connect("clicked", self.on_link_clicked, path)
+                btn.set_sensitive(False)
+                links_box.append(btn)
+                
+            button_box.append(links_box)
+            content.append(button_box)
+            
+            # Info
+            info_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+            info_box.set_margin_top(40)
+            info_box.set_halign(Gtk.Align.CENTER)
+            
+            self.node_label = Gtk.Label(label="Node ID: --")
+            self.node_label.add_css_class("dim-label")
+            self.node_label.add_css_class("monospace")
+            info_box.append(self.node_label)
+            
+            self.proxy_label = Gtk.Label(label="Proxy: 127.0.0.1:8888")
+            self.proxy_label.add_css_class("dim-label")
+            info_box.append(self.proxy_label)
+            
+            content.append(info_box)
+            
+            main_box.append(content)
+            self.apply_css()
+            
+        def apply_css(self):
+            """Apply custom CSS"""
+            css = b"""
+            window { background-color: #1a1a2e; }
+            .title-1 { color: #00ff88; font-size: 32px; font-weight: bold; }
+            .dim-label { color: #666; }
+            .monospace { font-family: monospace; font-size: 11px; }
+            button.suggested-action { background: linear-gradient(135deg, #00ff88, #00cc6a); color: #000; }
+            button.pill { border-radius: 20px; padding: 12px 24px; }
+            """
+            provider = Gtk.CssProvider()
+            provider.load_from_data(css)
+            Gtk.StyleContext.add_provider_for_display(
+                Gdk.Display.get_default(),
+                provider,
+                Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            )
         
-        def _start():
-            # Check if binary exists
-            if not self.daemon.binary_path.exists():
-                GLib.idle_add(lambda: self.loading_label.set_text("Downloading KayakNet..."))
-                if not self.daemon.download_binary():
-                    GLib.idle_add(lambda: self.show_error("Failed to download binary"))
+        def on_open_clicked(self, button):
+            webbrowser.open("http://127.0.0.1:8080")
+        
+        def on_link_clicked(self, button, path):
+            webbrowser.open(f"http://127.0.0.1:8080{path}")
+        
+        def start_daemon(self):
+            self.spinner.start()
+            self.status_label.set_text("Starting KayakNet...")
+            
+            def _start():
+                if not self.daemon.binary_path.exists():
+                    GLib.idle_add(lambda: self.status_label.set_text("Downloading..."))
+                    if not self.daemon.download_binary():
+                        GLib.idle_add(lambda: self.status_label.set_text("Download failed"))
+                        GLib.idle_add(lambda: self.spinner.stop())
+                        return
+                
+                GLib.idle_add(lambda: self.status_label.set_text("Starting daemon..."))
+                if not self.daemon.start():
+                    GLib.idle_add(lambda: self.status_label.set_text("Failed to start"))
+                    GLib.idle_add(lambda: self.spinner.stop())
                     return
+                
+                import time
+                for i in range(30):
+                    time.sleep(1)
+                    try:
+                        response = urllib.request.urlopen("http://127.0.0.1:8080/api/stats", timeout=2)
+                        data = json.loads(response.read())
+                        GLib.idle_add(lambda: self.on_daemon_ready(data))
+                        return
+                    except:
+                        GLib.idle_add(lambda i=i: self.status_label.set_text(f"Waiting... ({i+1}s)"))
+                
+                GLib.idle_add(lambda: self.status_label.set_text("Timeout - daemon not responding"))
+                GLib.idle_add(lambda: self.spinner.stop())
             
-            # Start daemon
-            GLib.idle_add(lambda: self.loading_label.set_text("Starting daemon..."))
-            if not self.daemon.start():
-                GLib.idle_add(lambda: self.show_error("Failed to start daemon"))
-                return
+            thread = threading.Thread(target=_start, daemon=True)
+            thread.start()
+        
+        def on_daemon_ready(self, stats):
+            self.spinner.stop()
+            self.status_label.set_text("● Connected")
+            self.status_label.remove_css_class("dim-label")
             
-            # Wait for daemon to be ready
-            import time
-            for i in range(30):  # Wait up to 30 seconds
-                time.sleep(1)
-                try:
-                    import urllib.request
-                    urllib.request.urlopen("http://127.0.0.1:8080/api/stats", timeout=2)
-                    GLib.idle_add(self.load_webview)
+            self.open_btn.set_sensitive(True)
+            for child in self.open_btn.get_parent().get_last_child().observe_children():
+                if isinstance(child, Gtk.Button):
+                    child.set_sensitive(True)
+            
+            # Update info
+            node_id = stats.get("node_id", "unknown")
+            if len(node_id) > 20:
+                node_id = node_id[:10] + "..." + node_id[-10:]
+            self.node_label.set_text(f"Node: {node_id}")
+
+
+    class KayakNetApp(Adw.Application):
+        """Main application (GTK4)"""
+        
+        def __init__(self):
+            super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.FLAGS_NONE)
+            self.window = None
+            
+        def do_activate(self):
+            if not self.window:
+                self.window = KayakNetWindow(self)
+            self.window.present()
+        
+        def do_shutdown(self):
+            if self.window and self.window.daemon:
+                self.window.daemon.stop()
+            Adw.Application.do_shutdown(self)
+
+
+# ===================== GTK3 VERSION =====================
+else:
+    
+    class KayakNetWindow(Gtk.ApplicationWindow):
+        """Main application window (GTK3)"""
+        
+        def __init__(self, app):
+            super().__init__(application=app, title=APP_NAME)
+            self.set_default_size(500, 600)
+            self.set_position(Gtk.WindowPosition.CENTER)
+            
+            self.daemon = KayakNetDaemon()
+            self.setup_ui()
+            self.start_daemon()
+            
+        def setup_ui(self):
+            """Setup the UI components"""
+            main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+            self.add(main_box)
+            
+            # Header bar
+            header = Gtk.HeaderBar()
+            header.set_show_close_button(True)
+            header.set_title("KayakNet")
+            header.set_subtitle("Anonymous Network")
+            self.set_titlebar(header)
+            
+            # Content
+            content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=20)
+            content.set_margin_top(40)
+            content.set_margin_bottom(40)
+            content.set_margin_start(40)
+            content.set_margin_end(40)
+            content.set_valign(Gtk.Align.CENTER)
+            content.set_halign(Gtk.Align.CENTER)
+            
+            # Logo
+            logo_label = Gtk.Label()
+            logo_label.set_markup("<span size='72000'>🛶</span>")
+            content.pack_start(logo_label, False, False, 0)
+            
+            title_label = Gtk.Label()
+            title_label.set_markup("<span size='xx-large' weight='bold' foreground='#00ff88'>KayakNet</span>")
+            content.pack_start(title_label, False, False, 0)
+            
+            subtitle_label = Gtk.Label(label="Anonymous • Encrypted • Unstoppable")
+            subtitle_label.get_style_context().add_class("dim-label")
+            content.pack_start(subtitle_label, False, False, 0)
+            
+            # Status
+            status_box = Gtk.Box(spacing=10)
+            status_box.set_halign(Gtk.Align.CENTER)
+            status_box.set_margin_top(20)
+            
+            self.spinner = Gtk.Spinner()
+            status_box.pack_start(self.spinner, False, False, 0)
+            
+            self.status_label = Gtk.Label(label="Starting...")
+            status_box.pack_start(self.status_label, False, False, 0)
+            content.pack_start(status_box, False, False, 0)
+            
+            # Open button
+            self.open_btn = Gtk.Button(label="Open KayakNet")
+            self.open_btn.get_style_context().add_class("suggested-action")
+            self.open_btn.set_size_request(200, 40)
+            self.open_btn.connect("clicked", self.on_open_clicked)
+            self.open_btn.set_sensitive(False)
+            self.open_btn.set_margin_top(30)
+            content.pack_start(self.open_btn, False, False, 0)
+            
+            # Quick links
+            links_box = Gtk.Box(spacing=10)
+            links_box.set_halign(Gtk.Align.CENTER)
+            links_box.set_margin_top(10)
+            
+            self.link_buttons = []
+            for name, path in [("Chat", "/chat"), ("Market", "/market"), ("Domains", "/domains")]:
+                btn = Gtk.Button(label=name)
+                btn.connect("clicked", self.on_link_clicked, path)
+                btn.set_sensitive(False)
+                links_box.pack_start(btn, False, False, 0)
+                self.link_buttons.append(btn)
+                
+            content.pack_start(links_box, False, False, 0)
+            
+            # Info
+            info_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+            info_box.set_margin_top(40)
+            
+            self.node_label = Gtk.Label(label="Node ID: --")
+            self.node_label.get_style_context().add_class("dim-label")
+            info_box.pack_start(self.node_label, False, False, 0)
+            
+            self.proxy_label = Gtk.Label(label="Proxy: 127.0.0.1:8888")
+            self.proxy_label.get_style_context().add_class("dim-label")
+            info_box.pack_start(self.proxy_label, False, False, 0)
+            
+            content.pack_start(info_box, False, False, 0)
+            
+            main_box.pack_start(content, True, True, 0)
+            self.apply_css()
+            self.show_all()
+            
+        def apply_css(self):
+            """Apply custom CSS"""
+            css = b"""
+            window { background-color: #1a1a2e; }
+            .dim-label { color: #666; }
+            label { color: #eee; }
+            """
+            provider = Gtk.CssProvider()
+            provider.load_from_data(css)
+            Gtk.StyleContext.add_provider_for_screen(
+                Gdk.Screen.get_default(),
+                provider,
+                Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            )
+        
+        def on_open_clicked(self, button):
+            webbrowser.open("http://127.0.0.1:8080")
+        
+        def on_link_clicked(self, button, path):
+            webbrowser.open(f"http://127.0.0.1:8080{path}")
+        
+        def start_daemon(self):
+            self.spinner.start()
+            self.status_label.set_text("Starting KayakNet...")
+            
+            def _start():
+                if not self.daemon.binary_path.exists():
+                    GLib.idle_add(lambda: self.status_label.set_text("Downloading..."))
+                    if not self.daemon.download_binary():
+                        GLib.idle_add(lambda: self.status_label.set_text("Download failed"))
+                        GLib.idle_add(lambda: self.spinner.stop())
+                        return
+                
+                GLib.idle_add(lambda: self.status_label.set_text("Starting daemon..."))
+                if not self.daemon.start():
+                    GLib.idle_add(lambda: self.status_label.set_text("Failed to start"))
+                    GLib.idle_add(lambda: self.spinner.stop())
                     return
-                except:
-                    GLib.idle_add(lambda: self.loading_label.set_text(f"Waiting for daemon... ({i+1}s)"))
+                
+                import time
+                for i in range(30):
+                    time.sleep(1)
+                    try:
+                        response = urllib.request.urlopen("http://127.0.0.1:8080/api/stats", timeout=2)
+                        data = json.loads(response.read())
+                        GLib.idle_add(lambda: self.on_daemon_ready(data))
+                        return
+                    except:
+                        GLib.idle_add(lambda i=i: self.status_label.set_text(f"Waiting... ({i+1}s)"))
+                
+                GLib.idle_add(lambda: self.status_label.set_text("Timeout"))
+                GLib.idle_add(lambda: self.spinner.stop())
             
-            GLib.idle_add(lambda: self.show_error("Daemon failed to start"))
+            thread = threading.Thread(target=_start, daemon=True)
+            thread.start()
         
-        thread = threading.Thread(target=_start, daemon=True)
-        thread.start()
-    
-    def load_webview(self):
-        """Load the WebView with KayakNet UI"""
-        self.webview.load_uri("http://127.0.0.1:8080/")
-    
-    def show_error(self, message):
-        """Show error page"""
-        self.error_label.set_text(message)
-        self.stack.set_visible_child_name("error")
-        self.update_status(False)
+        def on_daemon_ready(self, stats):
+            self.spinner.stop()
+            self.status_label.set_markup("<span foreground='#00ff88'>● Connected</span>")
+            
+            self.open_btn.set_sensitive(True)
+            for btn in self.link_buttons:
+                btn.set_sensitive(True)
+            
+            node_id = stats.get("node_id", "unknown")
+            if len(node_id) > 20:
+                node_id = node_id[:10] + "..." + node_id[-10:]
+            self.node_label.set_text(f"Node: {node_id}")
 
 
-class KayakNetApp(Adw.Application):
-    """Main application class"""
-    
-    def __init__(self):
-        super().__init__(
-            application_id=APP_ID,
-            flags=Gio.ApplicationFlags.FLAGS_NONE
-        )
-        self.window = None
+    class KayakNetApp(Gtk.Application):
+        """Main application (GTK3)"""
         
-    def do_startup(self):
-        Adw.Application.do_startup(self)
+        def __init__(self):
+            super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.FLAGS_NONE)
+            self.window = None
+            
+        def do_activate(self):
+            if not self.window:
+                self.window = KayakNetWindow(self)
+            self.window.present()
         
-        # Create actions
-        self.create_action("refresh", self.on_refresh)
-        self.create_action("copy_node_id", self.on_copy_node_id)
-        self.create_action("settings", self.on_settings)
-        self.create_action("about", self.on_about)
-        self.create_action("quit", self.on_quit)
-    
-    def do_activate(self):
-        if not self.window:
-            self.window = KayakNetWindow(self)
-        self.window.present()
-    
-    def create_action(self, name, callback):
-        action = Gio.SimpleAction.new(name, None)
-        action.connect("activate", callback)
-        self.add_action(action)
-    
-    def on_refresh(self, action, param):
-        if self.window:
-            self.window.webview.reload()
-    
-    def on_copy_node_id(self, action, param):
-        try:
-            import urllib.request
-            response = urllib.request.urlopen("http://127.0.0.1:8080/api/stats")
-            data = json.loads(response.read())
-            node_id = data.get("node_id", "")
-            if node_id:
-                clipboard = Gdk.Display.get_default().get_clipboard()
-                clipboard.set(node_id)
-        except:
-            pass
-    
-    def on_settings(self, action, param):
-        # TODO: Implement settings dialog
-        pass
-    
-    def on_about(self, action, param):
-        about = Adw.AboutWindow(
-            application_name="KayakNet",
-            application_icon="network-transmit-receive-symbolic",
-            version=APP_VERSION,
-            developer_name="KayakNet Team",
-            website="https://kayaknet.io",
-            issue_url="https://github.com/KayakNet/KayakNet/issues",
-            license_type=Gtk.License.MIT_X11,
-            comments="Anonymous • Encrypted • Unstoppable\n\nThe decentralized network for private communication and commerce.",
-            developers=["KayakNet Team"],
-            transient_for=self.window
-        )
-        about.present()
-    
-    def on_quit(self, action, param):
-        if self.window and self.window.daemon:
-            self.window.daemon.stop()
-        self.quit()
+        def do_shutdown(self):
+            if self.window and self.window.daemon:
+                self.window.daemon.stop()
+            Gtk.Application.do_shutdown(self)
 
 
 def main():
-    # Handle Ctrl+C
     signal.signal(signal.SIGINT, signal.SIG_DFL)
-    
     app = KayakNetApp()
     return app.run(sys.argv)
 
 
 if __name__ == "__main__":
     sys.exit(main())
-
