@@ -249,3 +249,4 @@ struct RegisterDomainView: View {
         .environmentObject(KayakNetClient())
 }
 
+

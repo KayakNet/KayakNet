@@ -127,3 +127,4 @@ struct FeatureRow: View {
         .environmentObject(KayakNetClient())
 }
 
+

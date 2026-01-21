@@ -6034,7 +6034,6 @@ const chatPageHTML = `<!DOCTYPE html>
         }
         
         // Typing indicator for DMs
-        let typingTimeout = null;
         function handleDMTyping() {
             if (!currentDM) return;
             fetch('/api/chat/dm/typing', {method: 'POST', body: new URLSearchParams({user: currentDM, typing: 'true'})});

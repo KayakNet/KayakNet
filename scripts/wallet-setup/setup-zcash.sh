@@ -197,3 +197,4 @@ warn "You can check sync status with: zcash-cli -datadir=$DATA_DIR getblockchain
 echo ""
 
 
+
