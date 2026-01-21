@@ -16,59 +16,49 @@ from pathlib import Path
 
 import gi
 gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk, GLib, Gio, Gdk, Pango
+from gi.repository import Gtk, GLib, Gdk
 
-APP_ID = "net.kayaknet.desktop"
-APP_NAME = "KayakNet"
 APP_VERSION = "1.0.0"
-
-BOOTSTRAP_SERVERS = [
-    "203.161.33.237:8080",
-    "144.172.94.195:8080"
-]
+BOOTSTRAP = "203.161.33.237:8080"
 
 
-def open_url(url):
-    """Open URL in default browser"""
+LOG_FILE = "/tmp/kayaknet-gui.log"
+
+def log(msg):
+    """Log to file and stdout"""
+    print(msg)
+    with open(LOG_FILE, "a") as f:
+        f.write(f"{msg}\n")
+
+def open_browser(url):
+    """Open URL in browser"""
+    log(f"[CLICK] Opening: {url}")
     try:
-        subprocess.Popen(['xdg-open', url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except:
+        result = subprocess.run(['xdg-open', url], capture_output=True, text=True)
+        log(f"[CLICK] xdg-open result: {result.returncode}")
+    except Exception as e:
+        log(f"[CLICK] xdg-open failed: {e}")
         try:
-            subprocess.Popen(['firefox', url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(['firefox', url])
         except:
             try:
-                subprocess.Popen(['chromium', url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.Popen(['google-chrome', url])
             except:
-                pass
+                log("[ERROR] Could not open browser")
 
 
 class KayakNetDaemon:
-    """Manages the KayakNet daemon process"""
-    
     def __init__(self):
         self.process = None
-        self.binary_path = self._get_binary_path()
         self.data_dir = Path.home() / ".kayaknet"
         self.data_dir.mkdir(exist_ok=True)
+        self.binary_path = self.data_dir / "kayakd"
         
-    def _get_binary_path(self):
-        locations = [
-            Path.home() / ".kayaknet" / "kayakd",
-            Path("/usr/local/bin/kayakd"),
-            Path("/usr/bin/kayakd"),
-            Path("./kayakd"),
-        ]
-        for loc in locations:
-            if loc.exists() and os.access(loc, os.X_OK):
-                return loc
-        return Path.home() / ".kayaknet" / "kayakd"
-    
-    def download_binary(self):
+    def download(self):
         if self.binary_path.exists():
             return True
         url = "https://github.com/KayakNet/downloads/raw/main/releases/linux/kayakd"
         try:
-            self.data_dir.mkdir(exist_ok=True)
             urllib.request.urlretrieve(url, self.binary_path)
             self.binary_path.chmod(self.binary_path.stat().st_mode | stat.S_IEXEC)
             return True
@@ -76,339 +66,249 @@ class KayakNetDaemon:
             print(f"Download failed: {e}")
             return False
     
-    def start(self, bootstrap=None):
+    def start(self):
         if self.process and self.process.poll() is None:
             return True
         if not self.binary_path.exists():
             return False
-        bootstrap = bootstrap or BOOTSTRAP_SERVERS[0]
-        cmd = [str(self.binary_path), "-proxy", "-bootstrap", bootstrap]
         try:
             self.process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                [str(self.binary_path), "-proxy", "-bootstrap", BOOTSTRAP],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 cwd=str(self.data_dir)
             )
             return True
         except Exception as e:
-            print(f"Failed to start: {e}")
+            print(f"Start failed: {e}")
             return False
     
     def stop(self):
         if self.process:
             self.process.terminate()
-            try:
-                self.process.wait(timeout=5)
-            except:
-                self.process.kill()
             self.process = None
-    
-    def is_running(self):
-        return self.process is not None and self.process.poll() is None
 
 
 class KayakNetWindow(Gtk.Window):
-    """Main application window with terminal theme"""
-    
     def __init__(self):
         super().__init__(title="KayakNet")
-        self.set_default_size(480, 580)
+        self.set_default_size(450, 500)
         self.set_position(Gtk.WindowPosition.CENTER)
-        self.set_resizable(True)
         
         self.daemon = KayakNetDaemon()
-        self.buttons = []
+        self.all_buttons = []
         
-        self.setup_ui()
         self.apply_css()
-        self.connect("destroy", self.on_destroy)
+        self.build_ui()
+        self.connect("destroy", self.on_quit)
         self.show_all()
-        self.start_daemon()
-    
-    def setup_ui(self):
-        # Main container
-        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        self.add(main_box)
         
-        # Terminal-style header
-        header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        header_box.set_name("header")
-        header_box.set_size_request(-1, 40)
-        
-        header_label = Gtk.Label()
-        header_label.set_markup("<span font_family='monospace' foreground='#00ff00'> [KAYAKNET] // ANONYMOUS NETWORK </span>")
-        header_label.set_halign(Gtk.Align.START)
-        header_label.set_margin_start(15)
-        header_box.pack_start(header_label, True, True, 0)
-        
-        main_box.pack_start(header_box, False, False, 0)
-        
-        # Content area
-        content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        content_box.set_name("content")
-        content_box.set_margin_top(30)
-        content_box.set_margin_bottom(30)
-        content_box.set_margin_start(30)
-        content_box.set_margin_end(30)
-        
-        # ASCII Logo
-        logo_text = """
-   ██╗  ██╗ █████╗ ██╗   ██╗ █████╗ ██╗  ██╗
-   ██║ ██╔╝██╔══██╗╚██╗ ██╔╝██╔══██╗██║ ██╔╝
-   █████╔╝ ███████║ ╚████╔╝ ███████║█████╔╝ 
-   ██╔═██╗ ██╔══██║  ╚██╔╝  ██╔══██║██╔═██╗ 
-   ██║  ██╗██║  ██║   ██║   ██║  ██║██║  ██╗
-   ╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝"""
-        
-        logo_label = Gtk.Label()
-        logo_label.set_markup(f"<span font_family='monospace' size='7000' foreground='#00ff00'>{logo_text}</span>")
-        logo_label.set_halign(Gtk.Align.CENTER)
-        content_box.pack_start(logo_label, False, False, 0)
-        
-        # Subtitle
-        subtitle = Gtk.Label()
-        subtitle.set_markup("<span font_family='monospace' foreground='#00aa00'>Anonymous // Encrypted // Unstoppable</span>")
-        subtitle.set_margin_top(10)
-        content_box.pack_start(subtitle, False, False, 0)
-        
-        # Status section
-        status_frame = Gtk.Frame()
-        status_frame.set_name("status-frame")
-        status_frame.set_margin_top(25)
-        status_frame.set_shadow_type(Gtk.ShadowType.NONE)
-        
-        status_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        status_box.set_margin_top(15)
-        status_box.set_margin_bottom(15)
-        status_box.set_margin_start(15)
-        status_box.set_margin_end(15)
-        
-        # Status line
-        status_line = Gtk.Box(spacing=10)
-        status_line.set_halign(Gtk.Align.CENTER)
-        
-        self.spinner = Gtk.Spinner()
-        self.spinner.set_size_request(16, 16)
-        status_line.pack_start(self.spinner, False, False, 0)
-        
-        self.status_label = Gtk.Label()
-        self.status_label.set_markup("<span font_family='monospace' foreground='#00aa00'>[INIT] Starting...</span>")
-        status_line.pack_start(self.status_label, False, False, 0)
-        
-        status_box.pack_start(status_line, False, False, 0)
-        
-        # Node info
-        self.node_label = Gtk.Label()
-        self.node_label.set_markup("<span font_family='monospace' size='9000' foreground='#00aa00'>Node: connecting...</span>")
-        self.node_label.set_halign(Gtk.Align.CENTER)
-        status_box.pack_start(self.node_label, False, False, 0)
-        
-        self.info_label = Gtk.Label()
-        self.info_label.set_markup("<span font_family='monospace' size='9000' foreground='#00aa00'>Proxy: 127.0.0.1:8888 | API: 127.0.0.1:8080</span>")
-        self.info_label.set_halign(Gtk.Align.CENTER)
-        status_box.pack_start(self.info_label, False, False, 0)
-        
-        status_frame.add(status_box)
-        content_box.pack_start(status_frame, False, False, 0)
-        
-        # Buttons section
-        buttons_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        buttons_box.set_margin_top(25)
-        buttons_box.set_halign(Gtk.Align.CENTER)
-        
-        # Main button
-        self.open_btn = Gtk.Button()
-        self.open_btn.set_name("main-btn")
-        self.open_btn.set_size_request(280, 45)
-        open_label = Gtk.Label()
-        open_label.set_markup("<span font_family='monospace' weight='bold'>> OPEN KAYAKNET</span>")
-        self.open_btn.add(open_label)
-        self.open_btn.connect("clicked", self.on_open_clicked)
-        self.open_btn.set_sensitive(False)
-        buttons_box.pack_start(self.open_btn, False, False, 0)
-        self.buttons.append(self.open_btn)
-        
-        # Navigation buttons row
-        nav_box = Gtk.Box(spacing=10)
-        nav_box.set_halign(Gtk.Align.CENTER)
-        nav_box.set_margin_top(5)
-        
-        for label, path in [("[CHAT]", "/chat"), ("[MARKET]", "/market"), ("[DOMAINS]", "/domains")]:
-            btn = Gtk.Button()
-            btn.set_name("nav-btn")
-            btn.set_size_request(85, 35)
-            btn_label = Gtk.Label()
-            btn_label.set_markup(f"<span font_family='monospace' size='9000'>{label}</span>")
-            btn.add(btn_label)
-            btn.connect("clicked", self.on_nav_clicked, path)
-            btn.set_sensitive(False)
-            nav_box.pack_start(btn, False, False, 0)
-            self.buttons.append(btn)
-        
-        buttons_box.pack_start(nav_box, False, False, 0)
-        content_box.pack_start(buttons_box, False, False, 0)
-        
-        # Footer
-        footer = Gtk.Label()
-        footer.set_markup("<span font_family='monospace' size='8000' foreground='#004400'>v" + APP_VERSION + " | github.com/KayakNet</span>")
-        footer.set_margin_top(30)
-        content_box.pack_start(footer, False, False, 0)
-        
-        main_box.pack_start(content_box, True, True, 0)
+        # Start daemon in background
+        threading.Thread(target=self.connect_daemon, daemon=True).start()
     
     def apply_css(self):
-        css = b"""
-        window {
-            background-color: #000000;
-        }
-        #header {
-            background-color: #0a0a0a;
-            border-bottom-width: 1px;
-            border-bottom-style: solid;
-            border-bottom-color: #00ff00;
-        }
-        #content {
-            background-color: #000000;
-        }
-        #status-frame {
-            background-color: #0a0a0a;
-            border-width: 1px;
-            border-style: solid;
-            border-color: #003300;
-            border-radius: 5px;
-        }
-        #main-btn {
+        css = """
+        window { background-color: #000000; }
+        .header { background-color: #0a0a0a; padding: 10px; }
+        .header-text { color: #00ff00; font-family: monospace; font-size: 14px; }
+        .logo { color: #00ff00; font-family: monospace; }
+        .subtitle { color: #00aa00; font-family: monospace; font-size: 12px; }
+        .status-box { background-color: #0a0a0a; padding: 15px; border-radius: 5px; }
+        .status-text { color: #00aa00; font-family: monospace; font-size: 11px; }
+        .status-online { color: #00ff00; font-family: monospace; font-weight: bold; }
+        .main-button {
             background-color: #002200;
-            background-image: none;
-            border-width: 1px;
-            border-style: solid;
-            border-color: #00ff00;
-            border-radius: 3px;
             color: #00ff00;
-            padding: 10px 20px;
-        }
-        #main-btn:hover {
-            background-color: #003300;
-        }
-        #main-btn:disabled {
-            background-color: #111111;
-            border-color: #333333;
-            color: #444444;
-        }
-        #nav-btn {
-            background-color: #0a0a0a;
-            background-image: none;
-            border-width: 1px;
-            border-style: solid;
-            border-color: #00aa00;
+            font-family: monospace;
+            font-weight: bold;
+            font-size: 14px;
+            border: 1px solid #00ff00;
             border-radius: 3px;
+            padding: 12px 24px;
+        }
+        .main-button:hover { background-color: #003300; }
+        .main-button:disabled { background-color: #111; color: #333; border-color: #333; }
+        .nav-button {
+            background-color: #0a0a0a;
             color: #00aa00;
-            padding: 5px 10px;
+            font-family: monospace;
+            font-size: 11px;
+            border: 1px solid #00aa00;
+            border-radius: 3px;
+            padding: 8px 12px;
         }
-        #nav-btn:hover {
-            background-color: #002200;
-            border-color: #00ff00;
-            color: #00ff00;
-        }
-        #nav-btn:disabled {
-            background-color: #0a0a0a;
-            border-color: #333333;
-            color: #333333;
-        }
-        label {
-            color: #00ff00;
-        }
+        .nav-button:hover { background-color: #002200; color: #00ff00; border-color: #00ff00; }
+        .nav-button:disabled { background-color: #0a0a0a; color: #333; border-color: #333; }
+        .footer { color: #004400; font-family: monospace; font-size: 10px; }
         """
         provider = Gtk.CssProvider()
-        provider.load_from_data(css)
+        provider.load_from_data(css.encode())
         Gtk.StyleContext.add_provider_for_screen(
-            Gdk.Screen.get_default(),
-            provider,
+            Gdk.Screen.get_default(), provider,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
     
-    def on_open_clicked(self, button):
-        print("Opening http://127.0.0.1:8080")
-        open_url("http://127.0.0.1:8080")
+    def build_ui(self):
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.add(vbox)
+        
+        # Header
+        header = Gtk.Box()
+        header.get_style_context().add_class("header")
+        header_label = Gtk.Label(label="[KAYAKNET] // ANONYMOUS NETWORK")
+        header_label.get_style_context().add_class("header-text")
+        header.pack_start(header_label, False, False, 15)
+        vbox.pack_start(header, False, False, 0)
+        
+        # Content
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=15)
+        content.set_margin_top(25)
+        content.set_margin_bottom(25)
+        content.set_margin_start(30)
+        content.set_margin_end(30)
+        
+        # Logo
+        logo = Gtk.Label()
+        logo.set_markup('<span font_family="monospace" size="xx-large" foreground="#00ff00" weight="bold">KAYAKNET</span>')
+        content.pack_start(logo, False, False, 10)
+        
+        # Subtitle
+        subtitle = Gtk.Label(label="Anonymous // Encrypted // Unstoppable")
+        subtitle.get_style_context().add_class("subtitle")
+        content.pack_start(subtitle, False, False, 0)
+        
+        # Status box
+        status_frame = Gtk.Frame()
+        status_frame.set_shadow_type(Gtk.ShadowType.NONE)
+        status_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        status_box.get_style_context().add_class("status-box")
+        status_box.set_margin_top(20)
+        
+        self.status_label = Gtk.Label(label="[INIT] Starting...")
+        self.status_label.get_style_context().add_class("status-text")
+        status_box.pack_start(self.status_label, False, False, 5)
+        
+        self.node_label = Gtk.Label(label="Node: connecting...")
+        self.node_label.get_style_context().add_class("status-text")
+        status_box.pack_start(self.node_label, False, False, 2)
+        
+        self.info_label = Gtk.Label(label="Proxy: 127.0.0.1:8888")
+        self.info_label.get_style_context().add_class("status-text")
+        status_box.pack_start(self.info_label, False, False, 2)
+        
+        status_frame.add(status_box)
+        content.pack_start(status_frame, False, False, 10)
+        
+        # Main button
+        self.open_btn = Gtk.Button(label="> OPEN KAYAKNET")
+        self.open_btn.get_style_context().add_class("main-button")
+        self.open_btn.set_size_request(250, 50)
+        self.open_btn.connect("clicked", self.on_open_click)
+        self.open_btn.set_sensitive(True)  # Start enabled for testing
+        self.all_buttons.append(self.open_btn)
+        
+        btn_box = Gtk.Box()
+        btn_box.set_halign(Gtk.Align.CENTER)
+        btn_box.set_margin_top(15)
+        btn_box.pack_start(self.open_btn, False, False, 0)
+        content.pack_start(btn_box, False, False, 0)
+        
+        # Nav buttons
+        nav_box = Gtk.Box(spacing=10)
+        nav_box.set_halign(Gtk.Align.CENTER)
+        nav_box.set_margin_top(10)
+        
+        for text, path in [("[CHAT]", "/chat"), ("[MARKET]", "/market"), ("[DOMAINS]", "/domains")]:
+            btn = Gtk.Button(label=text)
+            btn.get_style_context().add_class("nav-button")
+            btn.connect("clicked", self.on_nav_click, path)
+            btn.set_sensitive(True)  # Start enabled for testing
+            nav_box.pack_start(btn, False, False, 0)
+            self.all_buttons.append(btn)
+        
+        content.pack_start(nav_box, False, False, 0)
+        
+        # Footer
+        footer = Gtk.Label(label=f"v{APP_VERSION} | github.com/KayakNet")
+        footer.get_style_context().add_class("footer")
+        footer.set_margin_top(25)
+        content.pack_start(footer, False, False, 0)
+        
+        vbox.pack_start(content, True, False, 0)
     
-    def on_nav_clicked(self, button, path):
-        url = f"http://127.0.0.1:8080{path}"
-        print(f"Opening {url}")
-        open_url(url)
+    def on_open_click(self, widget):
+        log("[BUTTON] Open button clicked!")
+        open_browser("http://127.0.0.1:8080")
     
-    def on_destroy(self, widget):
-        if self.daemon:
-            self.daemon.stop()
+    def on_nav_click(self, widget, path):
+        log(f"[BUTTON] Nav button clicked: {path}")
+        open_browser(f"http://127.0.0.1:8080{path}")
+    
+    def on_quit(self, widget):
+        self.daemon.stop()
         Gtk.main_quit()
     
-    def start_daemon(self):
-        self.spinner.start()
+    def connect_daemon(self):
+        import time
         
-        def _start():
-            # Check if already running
+        # Check if already running
+        try:
+            resp = urllib.request.urlopen("http://127.0.0.1:8080/api/stats", timeout=2)
+            data = json.loads(resp.read())
+            GLib.idle_add(self.on_connected, data)
+            return
+        except:
+            pass
+        
+        # Download if needed
+        if not self.daemon.binary_path.exists():
+            GLib.idle_add(self.set_status, "[DOWNLOAD] Fetching binary...")
+            if not self.daemon.download():
+                GLib.idle_add(self.set_status, "[ERROR] Download failed")
+                return
+        
+        # Start daemon
+        GLib.idle_add(self.set_status, "[INIT] Starting daemon...")
+        if not self.daemon.start():
+            GLib.idle_add(self.set_status, "[ERROR] Start failed")
+            return
+        
+        # Wait for ready
+        for i in range(30):
+            time.sleep(1)
+            GLib.idle_add(self.set_status, f"[CONN] Connecting... {i+1}s")
             try:
-                response = urllib.request.urlopen("http://127.0.0.1:8080/api/stats", timeout=2)
-                data = json.loads(response.read())
+                resp = urllib.request.urlopen("http://127.0.0.1:8080/api/stats", timeout=2)
+                data = json.loads(resp.read())
                 GLib.idle_add(self.on_connected, data)
                 return
             except:
                 pass
-            
-            # Download if needed
-            if not self.daemon.binary_path.exists():
-                GLib.idle_add(self.set_status, "[DOWNLOAD] Fetching binary...")
-                if not self.daemon.download_binary():
-                    GLib.idle_add(self.set_status, "[ERROR] Download failed")
-                    GLib.idle_add(self.spinner.stop)
-                    return
-            
-            # Start daemon
-            GLib.idle_add(self.set_status, "[INIT] Starting daemon...")
-            if not self.daemon.start():
-                GLib.idle_add(self.set_status, "[ERROR] Failed to start")
-                GLib.idle_add(self.spinner.stop)
-                return
-            
-            # Wait for connection
-            import time
-            for i in range(30):
-                time.sleep(1)
-                try:
-                    response = urllib.request.urlopen("http://127.0.0.1:8080/api/stats", timeout=2)
-                    data = json.loads(response.read())
-                    GLib.idle_add(self.on_connected, data)
-                    return
-                except:
-                    GLib.idle_add(self.set_status, f"[CONN] Connecting... {i+1}s")
-            
-            GLib.idle_add(self.set_status, "[ERROR] Connection timeout")
-            GLib.idle_add(self.spinner.stop)
         
-        thread = threading.Thread(target=_start, daemon=True)
-        thread.start()
+        GLib.idle_add(self.set_status, "[ERROR] Connection timeout")
     
     def set_status(self, text):
-        self.status_label.set_markup(f"<span font_family='monospace' foreground='#00aa00'>{text}</span>")
+        self.status_label.set_text(text)
     
     def on_connected(self, stats):
-        self.spinner.stop()
-        self.status_label.set_markup("<span font_family='monospace' foreground='#00ff00' weight='bold'>[ONLINE] Connected to network</span>")
+        self.status_label.set_text("[ONLINE] Connected")
+        self.status_label.get_style_context().remove_class("status-text")
+        self.status_label.get_style_context().add_class("status-online")
         
-        # Enable all buttons
-        for btn in self.buttons:
+        # Enable buttons
+        for btn in self.all_buttons:
             btn.set_sensitive(True)
         
-        # Update node info
+        # Update info
         node_id = stats.get("node_id", "unknown")
-        if node_id and len(node_id) > 20:
-            node_id = node_id[:10] + "..." + node_id[-10:]
-        self.node_label.set_markup(f"<span font_family='monospace' size='9000' foreground='#00aa00'>Node: {node_id}</span>")
+        if node_id and len(node_id) > 16:
+            node_id = node_id[:8] + "..." + node_id[-8:]
+        self.node_label.set_text(f"Node: {node_id}")
         
-        version = stats.get("version", "?")
-        peers = stats.get("peers", 0)
-        listings = stats.get("listings", 0)
-        self.info_label.set_markup(f"<span font_family='monospace' size='9000' foreground='#00aa00'>{version} | {peers} peers | {listings} listings</span>")
+        v = stats.get("version", "?")
+        p = stats.get("peers", 0)
+        l = stats.get("listings", 0)
+        self.info_label.set_text(f"{v} | {p} peers | {l} listings")
 
 
 def main():
