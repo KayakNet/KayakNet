@@ -33,8 +33,10 @@ python3 -c "import gi; gi.require_version('Gtk', '4.0')" 2>/dev/null || MISSING_
 # Check Adwaita
 python3 -c "import gi; gi.require_version('Adw', '1')" 2>/dev/null || MISSING_DEPS="$MISSING_DEPS gir1.2-adw-1"
 
-# Check WebKit
-python3 -c "import gi; gi.require_version('WebKit', '6.0')" 2>/dev/null || MISSING_DEPS="$MISSING_DEPS gir1.2-webkit-6.0"
+# Check WebKit (try 6.0 first, then 4.1)
+python3 -c "import gi; gi.require_version('WebKit', '6.0')" 2>/dev/null || \
+python3 -c "import gi; gi.require_version('WebKit2', '4.1')" 2>/dev/null || \
+MISSING_DEPS="$MISSING_DEPS gir1.2-webkit2-4.1"
 
 if [ -n "$MISSING_DEPS" ]; then
     echo -e "${RED}Missing dependencies:${NC}$MISSING_DEPS"

@@ -7,9 +7,18 @@ A native GTK4 + WebKit application that runs KayakNet with a beautiful interface
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-gi.require_version('WebKit', '6.0')
 
-from gi.repository import Gtk, Adw, WebKit, GLib, Gio, Gdk
+# Try WebKit 6.0 first, fall back to WebKit2 4.1
+try:
+    gi.require_version('WebKit', '6.0')
+    from gi.repository import WebKit
+    WEBKIT_VERSION = 6
+except ValueError:
+    gi.require_version('WebKit2', '4.1')
+    from gi.repository import WebKit2 as WebKit
+    WEBKIT_VERSION = 4
+
+from gi.repository import Gtk, Adw, GLib, Gio, Gdk
 import subprocess
 import threading
 import os
