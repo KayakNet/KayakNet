@@ -140,9 +140,10 @@ if GTK_VERSION == 4:
         
         def __init__(self, app):
             super().__init__(application=app, title=APP_NAME)
-            self.set_default_size(500, 600)
+            self.set_default_size(500, 650)
             
             self.daemon = KayakNetDaemon()
+            self.link_buttons = []  # Store button references
             self.setup_ui()
             self.start_daemon()
             
@@ -157,6 +158,11 @@ if GTK_VERSION == 4:
             header.set_title_widget(title)
             main_box.append(header)
             
+            # Scrollable content
+            scroll = Gtk.ScrolledWindow()
+            scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            scroll.set_vexpand(True)
+            
             # Content
             content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=20)
             content.set_margin_top(40)
@@ -167,8 +173,7 @@ if GTK_VERSION == 4:
             content.set_halign(Gtk.Align.CENTER)
             
             # Logo/Title
-            logo_label = Gtk.Label(label="🛶")
-            logo_label.add_css_class("title-1")
+            logo_label = Gtk.Label()
             logo_label.set_markup("<span size='72000'>🛶</span>")
             content.append(logo_label)
             
@@ -193,15 +198,15 @@ if GTK_VERSION == 4:
             self.status_box.append(self.status_label)
             content.append(self.status_box)
             
-            # Buttons
+            # Main button
             button_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
             button_box.set_margin_top(30)
             button_box.set_halign(Gtk.Align.CENTER)
             
-            self.open_btn = Gtk.Button(label="Open KayakNet")
+            self.open_btn = Gtk.Button(label="🌐  Open KayakNet")
             self.open_btn.add_css_class("suggested-action")
             self.open_btn.add_css_class("pill")
-            self.open_btn.set_size_request(200, -1)
+            self.open_btn.set_size_request(220, 50)
             self.open_btn.connect("clicked", self.on_open_clicked)
             self.open_btn.set_sensitive(False)
             button_box.append(self.open_btn)
@@ -209,45 +214,69 @@ if GTK_VERSION == 4:
             # Quick links
             links_box = Gtk.Box(spacing=10)
             links_box.set_halign(Gtk.Align.CENTER)
-            links_box.set_margin_top(10)
+            links_box.set_margin_top(15)
             
-            for name, path in [("Chat", "/chat"), ("Market", "/market"), ("Domains", "/domains")]:
+            for name, icon, path in [("💬 Chat", "Chat", "/chat"), ("🛒 Market", "Market", "/market"), ("🌐 Domains", "Domains", "/domains")]:
                 btn = Gtk.Button(label=name)
+                btn.set_size_request(100, 40)
                 btn.connect("clicked", self.on_link_clicked, path)
                 btn.set_sensitive(False)
                 links_box.append(btn)
+                self.link_buttons.append(btn)  # Store reference!
                 
             button_box.append(links_box)
             content.append(button_box)
             
-            # Info
-            info_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-            info_box.set_margin_top(40)
-            info_box.set_halign(Gtk.Align.CENTER)
+            # Info section
+            info_frame = Gtk.Frame()
+            info_frame.set_margin_top(30)
+            info_frame.add_css_class("view")
             
-            self.node_label = Gtk.Label(label="Node ID: --")
-            self.node_label.add_css_class("dim-label")
+            info_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            info_box.set_margin_top(15)
+            info_box.set_margin_bottom(15)
+            info_box.set_margin_start(20)
+            info_box.set_margin_end(20)
+            
+            self.node_label = Gtk.Label(label="Node: Connecting...")
             self.node_label.add_css_class("monospace")
+            self.node_label.set_halign(Gtk.Align.START)
             info_box.append(self.node_label)
             
             self.proxy_label = Gtk.Label(label="Proxy: 127.0.0.1:8888")
             self.proxy_label.add_css_class("dim-label")
+            self.proxy_label.set_halign(Gtk.Align.START)
             info_box.append(self.proxy_label)
             
-            content.append(info_box)
+            self.api_label = Gtk.Label(label="API: http://127.0.0.1:8080")
+            self.api_label.add_css_class("dim-label")
+            self.api_label.set_halign(Gtk.Align.START)
+            info_box.append(self.api_label)
             
-            main_box.append(content)
+            info_frame.set_child(info_box)
+            content.append(info_frame)
+            
+            scroll.set_child(content)
+            main_box.append(scroll)
             self.apply_css()
             
         def apply_css(self):
             """Apply custom CSS"""
             css = b"""
-            window { background-color: #1a1a2e; }
-            .title-1 { color: #00ff88; font-size: 32px; font-weight: bold; }
-            .dim-label { color: #666; }
-            .monospace { font-family: monospace; font-size: 11px; }
-            button.suggested-action { background: linear-gradient(135deg, #00ff88, #00cc6a); color: #000; }
-            button.pill { border-radius: 20px; padding: 12px 24px; }
+            window { background-color: #0d1117; }
+            .title-1 { color: #00ff88; font-size: 36px; font-weight: bold; }
+            .dim-label { color: #8b949e; }
+            .monospace { font-family: monospace; font-size: 12px; color: #c9d1d9; }
+            button.suggested-action { 
+                background: linear-gradient(135deg, #00ff88, #00cc6a); 
+                color: #000; 
+                font-weight: bold;
+                font-size: 16px;
+            }
+            button.pill { border-radius: 25px; padding: 12px 24px; }
+            button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; }
+            button:hover { background: #30363d; }
+            frame { background: #161b22; border: 1px solid #30363d; border-radius: 10px; }
             """
             provider = Gtk.CssProvider()
             provider.load_from_data(css)
@@ -258,26 +287,38 @@ if GTK_VERSION == 4:
             )
         
         def on_open_clicked(self, button):
+            print("Opening browser to http://127.0.0.1:8080")
             webbrowser.open("http://127.0.0.1:8080")
         
         def on_link_clicked(self, button, path):
-            webbrowser.open(f"http://127.0.0.1:8080{path}")
+            url = f"http://127.0.0.1:8080{path}"
+            print(f"Opening browser to {url}")
+            webbrowser.open(url)
         
         def start_daemon(self):
             self.spinner.start()
             self.status_label.set_text("Starting KayakNet...")
             
             def _start():
+                # Check if already running
+                try:
+                    response = urllib.request.urlopen("http://127.0.0.1:8080/api/stats", timeout=2)
+                    data = json.loads(response.read())
+                    GLib.idle_add(lambda: self.on_daemon_ready(data))
+                    return
+                except:
+                    pass
+                
                 if not self.daemon.binary_path.exists():
-                    GLib.idle_add(lambda: self.status_label.set_text("Downloading..."))
+                    GLib.idle_add(lambda: self.status_label.set_text("Downloading binary..."))
                     if not self.daemon.download_binary():
-                        GLib.idle_add(lambda: self.status_label.set_text("Download failed"))
+                        GLib.idle_add(lambda: self.status_label.set_text("❌ Download failed"))
                         GLib.idle_add(lambda: self.spinner.stop())
                         return
                 
                 GLib.idle_add(lambda: self.status_label.set_text("Starting daemon..."))
                 if not self.daemon.start():
-                    GLib.idle_add(lambda: self.status_label.set_text("Failed to start"))
+                    GLib.idle_add(lambda: self.status_label.set_text("❌ Failed to start"))
                     GLib.idle_add(lambda: self.spinner.stop())
                     return
                 
@@ -287,12 +328,12 @@ if GTK_VERSION == 4:
                     try:
                         response = urllib.request.urlopen("http://127.0.0.1:8080/api/stats", timeout=2)
                         data = json.loads(response.read())
-                        GLib.idle_add(lambda: self.on_daemon_ready(data))
+                        GLib.idle_add(lambda d=data: self.on_daemon_ready(d))
                         return
                     except:
-                        GLib.idle_add(lambda i=i: self.status_label.set_text(f"Waiting... ({i+1}s)"))
+                        GLib.idle_add(lambda i=i: self.status_label.set_text(f"Connecting... ({i+1}s)"))
                 
-                GLib.idle_add(lambda: self.status_label.set_text("Timeout - daemon not responding"))
+                GLib.idle_add(lambda: self.status_label.set_text("❌ Connection timeout"))
                 GLib.idle_add(lambda: self.spinner.stop())
             
             thread = threading.Thread(target=_start, daemon=True)
@@ -300,19 +341,23 @@ if GTK_VERSION == 4:
         
         def on_daemon_ready(self, stats):
             self.spinner.stop()
-            self.status_label.set_text("● Connected")
-            self.status_label.remove_css_class("dim-label")
+            self.status_label.set_markup("<span foreground='#00ff88' weight='bold'>● Connected</span>")
             
+            # Enable all buttons
             self.open_btn.set_sensitive(True)
-            for child in self.open_btn.get_parent().get_last_child().observe_children():
-                if isinstance(child, Gtk.Button):
-                    child.set_sensitive(True)
+            for btn in self.link_buttons:
+                btn.set_sensitive(True)
             
             # Update info
             node_id = stats.get("node_id", "unknown")
-            if len(node_id) > 20:
-                node_id = node_id[:10] + "..." + node_id[-10:]
+            if node_id and len(node_id) > 24:
+                node_id = node_id[:12] + "..." + node_id[-12:]
             self.node_label.set_text(f"Node: {node_id}")
+            
+            version = stats.get("version", "unknown")
+            peers = stats.get("peers", 0)
+            listings = stats.get("listings", 0)
+            self.api_label.set_text(f"API: http://127.0.0.1:8080 | v{version} | {peers} peers | {listings} listings")
 
 
     class KayakNetApp(Adw.Application):
@@ -341,10 +386,11 @@ else:
         
         def __init__(self, app):
             super().__init__(application=app, title=APP_NAME)
-            self.set_default_size(500, 600)
+            self.set_default_size(500, 650)
             self.set_position(Gtk.WindowPosition.CENTER)
             
             self.daemon = KayakNetDaemon()
+            self.link_buttons = []
             self.setup_ui()
             self.start_daemon()
             
@@ -359,6 +405,10 @@ else:
             header.set_title("KayakNet")
             header.set_subtitle("Anonymous Network")
             self.set_titlebar(header)
+            
+            # Scrollable content
+            scroll = Gtk.ScrolledWindow()
+            scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
             
             # Content
             content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=20)
@@ -395,9 +445,9 @@ else:
             content.pack_start(status_box, False, False, 0)
             
             # Open button
-            self.open_btn = Gtk.Button(label="Open KayakNet")
+            self.open_btn = Gtk.Button(label="🌐  Open KayakNet")
             self.open_btn.get_style_context().add_class("suggested-action")
-            self.open_btn.set_size_request(200, 40)
+            self.open_btn.set_size_request(220, 50)
             self.open_btn.connect("clicked", self.on_open_clicked)
             self.open_btn.set_sensitive(False)
             self.open_btn.set_margin_top(30)
@@ -406,11 +456,11 @@ else:
             # Quick links
             links_box = Gtk.Box(spacing=10)
             links_box.set_halign(Gtk.Align.CENTER)
-            links_box.set_margin_top(10)
+            links_box.set_margin_top(15)
             
-            self.link_buttons = []
-            for name, path in [("Chat", "/chat"), ("Market", "/market"), ("Domains", "/domains")]:
+            for name, path in [("💬 Chat", "/chat"), ("🛒 Market", "/market"), ("🌐 Domains", "/domains")]:
                 btn = Gtk.Button(label=name)
+                btn.set_size_request(100, 40)
                 btn.connect("clicked", self.on_link_clicked, path)
                 btn.set_sensitive(False)
                 links_box.pack_start(btn, False, False, 0)
@@ -419,10 +469,10 @@ else:
             content.pack_start(links_box, False, False, 0)
             
             # Info
-            info_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+            info_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
             info_box.set_margin_top(40)
             
-            self.node_label = Gtk.Label(label="Node ID: --")
+            self.node_label = Gtk.Label(label="Node: Connecting...")
             self.node_label.get_style_context().add_class("dim-label")
             info_box.pack_start(self.node_label, False, False, 0)
             
@@ -430,18 +480,25 @@ else:
             self.proxy_label.get_style_context().add_class("dim-label")
             info_box.pack_start(self.proxy_label, False, False, 0)
             
+            self.api_label = Gtk.Label(label="API: http://127.0.0.1:8080")
+            self.api_label.get_style_context().add_class("dim-label")
+            info_box.pack_start(self.api_label, False, False, 0)
+            
             content.pack_start(info_box, False, False, 0)
             
-            main_box.pack_start(content, True, True, 0)
+            scroll.add(content)
+            main_box.pack_start(scroll, True, True, 0)
             self.apply_css()
             self.show_all()
             
         def apply_css(self):
             """Apply custom CSS"""
             css = b"""
-            window { background-color: #1a1a2e; }
-            .dim-label { color: #666; }
-            label { color: #eee; }
+            window { background-color: #0d1117; }
+            .dim-label { color: #8b949e; }
+            label { color: #c9d1d9; }
+            button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; }
+            button:hover { background: #30363d; }
             """
             provider = Gtk.CssProvider()
             provider.load_from_data(css)
@@ -452,26 +509,38 @@ else:
             )
         
         def on_open_clicked(self, button):
+            print("Opening browser to http://127.0.0.1:8080")
             webbrowser.open("http://127.0.0.1:8080")
         
         def on_link_clicked(self, button, path):
-            webbrowser.open(f"http://127.0.0.1:8080{path}")
+            url = f"http://127.0.0.1:8080{path}"
+            print(f"Opening browser to {url}")
+            webbrowser.open(url)
         
         def start_daemon(self):
             self.spinner.start()
             self.status_label.set_text("Starting KayakNet...")
             
             def _start():
+                # Check if already running
+                try:
+                    response = urllib.request.urlopen("http://127.0.0.1:8080/api/stats", timeout=2)
+                    data = json.loads(response.read())
+                    GLib.idle_add(lambda: self.on_daemon_ready(data))
+                    return
+                except:
+                    pass
+                
                 if not self.daemon.binary_path.exists():
-                    GLib.idle_add(lambda: self.status_label.set_text("Downloading..."))
+                    GLib.idle_add(lambda: self.status_label.set_text("Downloading binary..."))
                     if not self.daemon.download_binary():
-                        GLib.idle_add(lambda: self.status_label.set_text("Download failed"))
+                        GLib.idle_add(lambda: self.status_label.set_text("❌ Download failed"))
                         GLib.idle_add(lambda: self.spinner.stop())
                         return
                 
                 GLib.idle_add(lambda: self.status_label.set_text("Starting daemon..."))
                 if not self.daemon.start():
-                    GLib.idle_add(lambda: self.status_label.set_text("Failed to start"))
+                    GLib.idle_add(lambda: self.status_label.set_text("❌ Failed to start"))
                     GLib.idle_add(lambda: self.spinner.stop())
                     return
                 
@@ -481,12 +550,12 @@ else:
                     try:
                         response = urllib.request.urlopen("http://127.0.0.1:8080/api/stats", timeout=2)
                         data = json.loads(response.read())
-                        GLib.idle_add(lambda: self.on_daemon_ready(data))
+                        GLib.idle_add(lambda d=data: self.on_daemon_ready(d))
                         return
                     except:
-                        GLib.idle_add(lambda i=i: self.status_label.set_text(f"Waiting... ({i+1}s)"))
+                        GLib.idle_add(lambda i=i: self.status_label.set_text(f"Connecting... ({i+1}s)"))
                 
-                GLib.idle_add(lambda: self.status_label.set_text("Timeout"))
+                GLib.idle_add(lambda: self.status_label.set_text("❌ Connection timeout"))
                 GLib.idle_add(lambda: self.spinner.stop())
             
             thread = threading.Thread(target=_start, daemon=True)
@@ -494,16 +563,22 @@ else:
         
         def on_daemon_ready(self, stats):
             self.spinner.stop()
-            self.status_label.set_markup("<span foreground='#00ff88'>● Connected</span>")
+            self.status_label.set_markup("<span foreground='#00ff88' weight='bold'>● Connected</span>")
             
+            # Enable all buttons
             self.open_btn.set_sensitive(True)
             for btn in self.link_buttons:
                 btn.set_sensitive(True)
             
             node_id = stats.get("node_id", "unknown")
-            if len(node_id) > 20:
-                node_id = node_id[:10] + "..." + node_id[-10:]
+            if node_id and len(node_id) > 24:
+                node_id = node_id[:12] + "..." + node_id[-12:]
             self.node_label.set_text(f"Node: {node_id}")
+            
+            version = stats.get("version", "unknown")
+            peers = stats.get("peers", 0)
+            listings = stats.get("listings", 0)
+            self.api_label.set_text(f"API: http://127.0.0.1:8080 | v{version} | {peers} peers | {listings} listings")
 
 
     class KayakNetApp(Gtk.Application):
