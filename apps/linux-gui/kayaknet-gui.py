@@ -33,18 +33,30 @@ def log(msg):
 def open_browser(url):
     """Open URL in browser"""
     log(f"[CLICK] Opening: {url}")
-    try:
-        result = subprocess.run(['xdg-open', url], capture_output=True, text=True)
-        log(f"[CLICK] xdg-open result: {result.returncode}")
-    except Exception as e:
-        log(f"[CLICK] xdg-open failed: {e}")
+    
+    # Try browsers in order of preference
+    browsers = [
+        ['firefox', url],
+        ['firefox', '--new-tab', url],
+        ['google-chrome', url],
+        ['chromium', url],
+        ['chromium-browser', url],
+        ['xdg-open', url],
+    ]
+    
+    for cmd in browsers:
         try:
-            subprocess.Popen(['firefox', url])
-        except:
-            try:
-                subprocess.Popen(['google-chrome', url])
-            except:
-                log("[ERROR] Could not open browser")
+            log(f"[CLICK] Trying: {cmd[0]}")
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            log(f"[CLICK] Launched {cmd[0]} (pid: {proc.pid})")
+            return
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            log(f"[CLICK] {cmd[0]} failed: {e}")
+            continue
+    
+    log("[ERROR] No browser found!")
 
 
 class KayakNetDaemon:
