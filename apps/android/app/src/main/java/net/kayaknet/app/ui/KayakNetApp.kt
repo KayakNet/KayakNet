@@ -21,6 +21,7 @@ import net.kayaknet.app.ui.screens.*
 sealed class Screen(val route: String, val title: String, val icon: @Composable () -> Unit) {
     object Home : Screen("home", "HOME", { Icon(Icons.Filled.Home, contentDescription = null) })
     object Chat : Screen("chat", "CHAT", { Icon(Icons.Filled.Chat, contentDescription = null) })
+    object Kayaker : Screen("kayaker", "KAYAKER", { Icon(Icons.Filled.Edit, contentDescription = null) })
     object Market : Screen("market", "MARKET", { Icon(Icons.Filled.Store, contentDescription = null) })
     object Domains : Screen("domains", "DOMAINS", { Icon(Icons.Filled.Language, contentDescription = null) })
     object Settings : Screen("settings", "SETTINGS", { Icon(Icons.Filled.Settings, contentDescription = null) })
@@ -36,7 +37,7 @@ fun KayakNetAppUI() {
     val client = KayakNetApp.instance.client
     val connectionState by client.connectionState.collectAsState()
     
-    val screens = listOf(Screen.Home, Screen.Chat, Screen.Market, Screen.Domains, Screen.Settings)
+    val screens = listOf(Screen.Home, Screen.Chat, Screen.Kayaker, Screen.Market, Screen.Domains, Screen.Settings)
     
     Scaffold(
         topBar = {
@@ -132,6 +133,7 @@ fun KayakNetAppUI() {
                 }
             }) }
             composable(Screen.Chat.route) { ChatScreen() }
+            composable(Screen.Kayaker.route) { KayakerScreen() }
             composable(Screen.Market.route) { MarketScreen() }
             composable(Screen.Domains.route) { DomainsScreen() }
             composable(Screen.Settings.route) { SettingsScreen() }
