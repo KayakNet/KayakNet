@@ -1,0 +1,29 @@
+app-id: net.kayaknet.KayakNet
+runtime: org.gnome.Platform
+runtime-version: '45'
+sdk: org.gnome.Sdk
+command: kayaknet-gui
+
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri
+  - --filesystem=home
+
+modules:
+  - name: kayaknet
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 kayaknet-gui.py /app/bin/kayaknet-gui
+      - install -Dm644 net.kayaknet.KayakNet.desktop /app/share/applications/net.kayaknet.KayakNet.desktop
+      - install -Dm644 kayaknet.png /app/share/icons/hicolor/256x256/apps/net.kayaknet.KayakNet.png
+    sources:
+      - type: file
+        path: ../kayaknet-gui.py
+      - type: file
+        path: net.kayaknet.KayakNet.desktop
+      - type: file
+        path: kayaknet.png
+

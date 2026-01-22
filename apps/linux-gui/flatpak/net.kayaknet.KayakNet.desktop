@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=KayakNet
+Comment=Anonymous Encrypted Network - Chat, Marketplace, Domains
+Exec=kayaknet-gui
+Icon=net.kayaknet.KayakNet
+Terminal=false
+Type=Application
+Categories=Network;InstantMessaging;Security;
+Keywords=anonymous;encrypted;chat;marketplace;privacy;p2p;
+StartupNotify=true
+
