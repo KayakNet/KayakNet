@@ -230,7 +230,7 @@ class KayakNetWindow(Gtk.Window):
         nav_box.set_halign(Gtk.Align.CENTER)
         nav_box.set_margin_top(10)
         
-        for text, path in [("[CHAT]", "/chat"), ("[MARKET]", "/market"), ("[DOMAINS]", "/domains")]:
+        for text, path in [("[CHAT]", "/chat"), ("[MARKET]", "/marketplace"), ("[KAYAKER]", "/kayaker"), ("[DOMAINS]", "/domains")]:
             btn = Gtk.Button(label=text)
             btn.get_style_context().add_class("nav-button")
             btn.connect("clicked", self.on_nav_click, path)
