@@ -421,3 +421,4 @@ func (u *Updater) ForceCheck() (*GitHubRelease, error) {
 
 
 
+

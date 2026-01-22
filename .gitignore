@@ -69,3 +69,6 @@ wallets/
 tmp/
 temp/
 
+kayakd-build
+kayakd-linux
+kayakd-linux-amd64

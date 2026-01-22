@@ -28,6 +28,7 @@ import (
 	"github.com/kayaknet/kayaknet/internal/cap"
 	"github.com/kayaknet/kayaknet/internal/chat"
 	"github.com/kayaknet/kayaknet/internal/config"
+	"github.com/kayaknet/kayaknet/internal/kayaker"
 	"github.com/kayaknet/kayaknet/internal/dht"
 	"github.com/kayaknet/kayaknet/internal/e2e"
 	"github.com/kayaknet/kayaknet/internal/escrow"
@@ -74,6 +75,7 @@ type Node struct {
 	mixer        *mix.Mixer
 	marketplace  *market.Marketplace
 	chatMgr      *chat.ChatManager
+	kayakerMgr   *kayaker.Manager
 	nameService  *names.NameService
 	browserProxy *proxy.Proxy
 	homepage     *Homepage
@@ -124,10 +126,12 @@ const (
 	MsgTypeNameReg      = 0x30 // .kyk domain registration
 	MsgTypeNameLookup   = 0x31 // .kyk domain lookup
 	MsgTypeNameReply    = 0x32 // .kyk domain resolution response
-	MsgTypePoWChallenge = 0x40 // Proof-of-work challenge (anti-Sybil)
-	MsgTypePoWResponse  = 0x41 // Proof-of-work response
-	MsgTypePoWVerified  = 0x42 // PoW verification acknowledgment
-	MsgTypeRelay        = 0x50 // Relay message to another peer
+	MsgTypePoWChallenge  = 0x40 // Proof-of-work challenge (anti-Sybil)
+	MsgTypePoWResponse   = 0x41 // Proof-of-work response
+	MsgTypePoWVerified   = 0x42 // PoW verification acknowledgment
+	MsgTypeRelay         = 0x50 // Relay message to another peer
+	MsgTypeKayakerPost   = 0x60 // Kayaker microblog post
+	MsgTypeKayakerProfile = 0x61 // Kayaker profile update
 )
 
 // P2PMessage is the wire format
@@ -233,6 +237,15 @@ func (h *Homepage) Start(port int) error {
 	mux.HandleFunc("/chat", h.handleChatPage)
 	mux.HandleFunc("/domains", h.handleDomainsPage)
 	mux.HandleFunc("/network", h.handleNetworkPage)
+	mux.HandleFunc("/kayaker", h.handleKayakerPage)
+	mux.HandleFunc("/api/kayaker/profile", h.handleKayakerProfile)
+	mux.HandleFunc("/api/kayaker/posts", h.handleKayakerPosts)
+	mux.HandleFunc("/api/kayaker/post/", h.handleKayakerPost)
+	mux.HandleFunc("/api/kayaker/feed", h.handleKayakerFeed)
+	mux.HandleFunc("/api/kayaker/follow", h.handleKayakerFollow)
+	mux.HandleFunc("/api/kayaker/like", h.handleKayakerLike)
+	mux.HandleFunc("/api/kayaker/notifications", h.handleKayakerNotifications)
+	mux.HandleFunc("/api/kayaker/search", h.handleKayakerSearch)
 	mux.HandleFunc("/assets/logo.png", h.handleLogo)
 
 	bindAddr := "127.0.0.1"
@@ -523,6 +536,28 @@ func NewNode(cfg *config.Config, name string) (*Node, error) {
 		id.Sign,
 	)
 
+	// Create Kayaker microblogging manager
+	n.kayakerMgr, err = kayaker.NewManager(*dataDir, id.NodeID(), id.PublicKey(), id.PrivateKey())
+	if err != nil {
+		log.Printf("Warning: failed to initialize Kayaker: %v", err)
+	} else {
+		// Set up P2P sync callbacks
+		n.kayakerMgr.SetSyncCallbacks(
+			func(post *kayaker.Post) {
+				// Broadcast new post to network
+				if data, err := kayaker.MarshalPost(post); err == nil {
+					n.broadcast(MsgTypeKayakerPost, data)
+				}
+			},
+			func(profile *kayaker.Profile) {
+				// Broadcast profile update to network
+				if data, err := kayaker.MarshalProfile(profile); err == nil {
+					n.broadcast(MsgTypeKayakerProfile, data)
+				}
+			},
+		)
+	}
+
 	// Create E2E encryption manager for perfect privacy
 	// Messages encrypted so ONLY recipient can read - no relay/bootstrap oversight
 	n.e2e = e2e.NewE2EManager(
@@ -695,6 +730,9 @@ func (n *Node) Stop() {
 	if n.chatMgr != nil {
 		n.chatMgr.Save()
 	}
+	if n.kayakerMgr != nil {
+		n.kayakerMgr.Close()
+	}
 	if n.nameService != nil {
 		n.nameService.Save()
 	}
@@ -839,6 +877,10 @@ func (n *Node) handleMessage(from net.Addr, msg *P2PMessage) {
 		n.handlePoWVerified(msg)
 	case MsgTypeRelay:
 		n.handleRelay(from, msg)
+	case MsgTypeKayakerPost:
+		n.handleKayakerPost(msg)
+	case MsgTypeKayakerProfile:
+		n.handleKayakerProfile(msg)
 	}
 }
 
@@ -1251,6 +1293,42 @@ func (n *Node) handleListing(msg *P2PMessage) {
 	}
 
 	log.Printf("[PKG] New listing: %s", listing.Title)
+}
+
+// handleKayakerPost processes Kayaker posts from the network
+func (n *Node) handleKayakerPost(msg *P2PMessage) {
+	if n.kayakerMgr == nil {
+		return
+	}
+
+	post, err := kayaker.UnmarshalPost(msg.Payload)
+	if err != nil {
+		return
+	}
+
+	if err := n.kayakerMgr.ImportPost(post); err != nil {
+		return
+	}
+
+	log.Printf("[KAYAKER] Imported post %s from @%s", post.ID[:8], post.AuthorHandle)
+}
+
+// handleKayakerProfile processes Kayaker profiles from the network
+func (n *Node) handleKayakerProfile(msg *P2PMessage) {
+	if n.kayakerMgr == nil {
+		return
+	}
+
+	profile, err := kayaker.UnmarshalProfile(msg.Payload)
+	if err != nil {
+		return
+	}
+
+	if err := n.kayakerMgr.ImportProfile(profile); err != nil {
+		return
+	}
+
+	log.Printf("[KAYAKER] Imported profile @%s", profile.Handle)
 }
 
 // handleOnion processes onion-routed message (relay or final destination)
@@ -4413,6 +4491,387 @@ func (h *Homepage) handleNetworkPage(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(networkPageHTML))
 }
 
+// ============================================================================
+// Kayaker Handlers - Twitter/Threads-like Microblogging
+// ============================================================================
+
+func (h *Homepage) handleKayakerPage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(kayakerPageHTML))
+}
+
+func (h *Homepage) handleKayakerProfile(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if h.node.kayakerMgr == nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "Kayaker not initialized"})
+		return
+	}
+
+	switch r.Method {
+	case "GET":
+		// Get profile by ID/handle or own profile
+		idOrHandle := r.URL.Query().Get("id")
+		var profile *kayaker.Profile
+		var err error
+		if idOrHandle == "" {
+			profile, err = h.node.kayakerMgr.GetMyProfile()
+		} else {
+			profile, err = h.node.kayakerMgr.GetProfile(idOrHandle)
+		}
+		if err != nil || profile == nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "Profile not found"})
+			return
+		}
+		json.NewEncoder(w).Encode(kayaker.ProfileToJSON(profile))
+
+	case "POST":
+		// Create or update profile
+		var req struct {
+			Handle      string `json:"handle"`
+			DisplayName string `json:"display_name"`
+			Bio         string `json:"bio"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "Invalid request"})
+			return
+		}
+		profile, err := h.node.kayakerMgr.CreateProfile(req.Handle, req.DisplayName, req.Bio)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(kayaker.ProfileToJSON(profile))
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (h *Homepage) handleKayakerPosts(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if h.node.kayakerMgr == nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "Kayaker not initialized"})
+		return
+	}
+
+	switch r.Method {
+	case "POST":
+		// Create new post
+		var req kayaker.CreatePostRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "Invalid request"})
+			return
+		}
+		if req.Visibility == "" {
+			req.Visibility = kayaker.VisibilityPublic
+		}
+		post, err := h.node.kayakerMgr.CreatePost(req)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+		// Include decrypted content in response
+		content, _ := h.node.kayakerMgr.DecryptPostContent(post)
+		response := kayaker.PostToJSON(post)
+		response["decrypted_content"] = content
+		json.NewEncoder(w).Encode(response)
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (h *Homepage) handleKayakerPost(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if h.node.kayakerMgr == nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "Kayaker not initialized"})
+		return
+	}
+
+	// Extract post ID from path /api/kayaker/post/{id}
+	postID := strings.TrimPrefix(r.URL.Path, "/api/kayaker/post/")
+	if postID == "" {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "Post ID required"})
+		return
+	}
+
+	switch r.Method {
+	case "GET":
+		post, err := h.node.kayakerMgr.GetPost(postID)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+		content, _ := h.node.kayakerMgr.DecryptPostContent(post)
+		response := kayaker.PostToJSON(post)
+		response["decrypted_content"] = content
+		
+		// Get replies
+		repliesResp, _ := h.node.kayakerMgr.GetFeed(kayaker.FeedRequest{
+			Type:   kayaker.FeedReplies,
+			PostID: postID,
+			Limit:  20,
+		})
+		if repliesResp != nil {
+			var replies []map[string]interface{}
+			for _, reply := range repliesResp.Posts {
+				replyJSON := kayaker.PostToJSON(&reply)
+				c, _ := h.node.kayakerMgr.DecryptPostContent(&reply)
+				replyJSON["decrypted_content"] = c
+				replies = append(replies, replyJSON)
+			}
+			response["replies"] = replies
+		}
+		json.NewEncoder(w).Encode(response)
+
+	case "DELETE":
+		if err := h.node.kayakerMgr.DeletePost(postID); err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (h *Homepage) handleKayakerFeed(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if h.node.kayakerMgr == nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "Kayaker not initialized"})
+		return
+	}
+
+	feedType := r.URL.Query().Get("type")
+	if feedType == "" {
+		feedType = "explore"
+	}
+
+	var ft kayaker.FeedType
+	switch feedType {
+	case "home":
+		ft = kayaker.FeedHome
+	case "explore":
+		ft = kayaker.FeedExplore
+	case "profile":
+		ft = kayaker.FeedProfile
+	default:
+		ft = kayaker.FeedExplore
+	}
+
+	limit := 20
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 && parsed <= 50 {
+			limit = parsed
+		}
+	}
+
+	resp, err := h.node.kayakerMgr.GetFeed(kayaker.FeedRequest{
+		Type:   ft,
+		UserID: r.URL.Query().Get("user_id"),
+		Cursor: r.URL.Query().Get("cursor"),
+		Limit:  limit,
+	})
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+
+	// Decrypt post contents
+	var posts []map[string]interface{}
+	for _, post := range resp.Posts {
+		postJSON := kayaker.PostToJSON(&post)
+		content, _ := h.node.kayakerMgr.DecryptPostContent(&post)
+		postJSON["decrypted_content"] = content
+		// Check if current user liked this post
+		liked, _ := h.node.kayakerMgr.HasLiked(post.ID)
+		postJSON["liked"] = liked
+		posts = append(posts, postJSON)
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"posts":       posts,
+		"next_cursor": resp.NextCursor,
+		"has_more":    resp.HasMore,
+	})
+}
+
+func (h *Homepage) handleKayakerFollow(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if h.node.kayakerMgr == nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "Kayaker not initialized"})
+		return
+	}
+
+	switch r.Method {
+	case "GET":
+		// Get followers or following
+		userID := r.URL.Query().Get("user_id")
+		listType := r.URL.Query().Get("type") // "followers" or "following"
+		
+		limit := 20
+		offset := 0
+		if l := r.URL.Query().Get("limit"); l != "" {
+			limit, _ = strconv.Atoi(l)
+		}
+		if o := r.URL.Query().Get("offset"); o != "" {
+			offset, _ = strconv.Atoi(o)
+		}
+
+		var profiles []kayaker.Profile
+		var err error
+		if listType == "following" {
+			profiles, err = h.node.kayakerMgr.GetFollowing(userID, limit, offset)
+		} else {
+			profiles, err = h.node.kayakerMgr.GetFollowers(userID, limit, offset)
+		}
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+
+		var result []map[string]interface{}
+		for _, p := range profiles {
+			result = append(result, kayaker.ProfileToJSON(&p))
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"profiles": result})
+
+	case "POST":
+		// Follow a user
+		var req struct {
+			UserID string `json:"user_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "Invalid request"})
+			return
+		}
+		if err := h.node.kayakerMgr.Follow(req.UserID); err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+
+	case "DELETE":
+		// Unfollow a user
+		userID := r.URL.Query().Get("user_id")
+		if userID == "" {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "user_id required"})
+			return
+		}
+		if err := h.node.kayakerMgr.Unfollow(userID); err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (h *Homepage) handleKayakerLike(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if h.node.kayakerMgr == nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "Kayaker not initialized"})
+		return
+	}
+
+	switch r.Method {
+	case "POST":
+		var req struct {
+			PostID string `json:"post_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "Invalid request"})
+			return
+		}
+		if err := h.node.kayakerMgr.LikePost(req.PostID); err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+
+	case "DELETE":
+		postID := r.URL.Query().Get("post_id")
+		if postID == "" {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "post_id required"})
+			return
+		}
+		if err := h.node.kayakerMgr.UnlikePost(postID); err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (h *Homepage) handleKayakerNotifications(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if h.node.kayakerMgr == nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "Kayaker not initialized"})
+		return
+	}
+
+	switch r.Method {
+	case "GET":
+		limit := 50
+		unreadOnly := r.URL.Query().Get("unread") == "true"
+		notifications, err := h.node.kayakerMgr.GetNotifications(limit, unreadOnly)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"notifications": notifications})
+
+	case "POST":
+		// Mark all as read
+		if err := h.node.kayakerMgr.MarkNotificationsRead(); err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (h *Homepage) handleKayakerSearch(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if h.node.kayakerMgr == nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "Kayaker not initialized"})
+		return
+	}
+
+	query := r.URL.Query().Get("q")
+	searchType := r.URL.Query().Get("type") // "user", "hashtag", or empty for both
+	
+	limit := 20
+	if l := r.URL.Query().Get("limit"); l != "" {
+		limit, _ = strconv.Atoi(l)
+	}
+
+	results, err := h.node.kayakerMgr.Search(query, searchType, limit)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{"results": results})
+}
+
 // handleLogo serves the KayakNet logo
 func (h *Homepage) handleLogo(w http.ResponseWriter, r *http.Request) {
 	// Try to read logo from assets directory
@@ -7025,6 +7484,708 @@ const networkPageHTML = `<!DOCTYPE html>
         checkUpdates();
         setInterval(loadNetwork, 5000);
         setInterval(checkUpdates, 60000);
+    </script>
+</body>
+</html>`
+
+const kayakerPageHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KAYAKER // KAYAKNET</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=VT323&family=Space+Grotesk:wght@400;600;700&display=swap');
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --bg: #000000;
+            --bg-card: #0a0a0a;
+            --bg-hover: #111111;
+            --green: #00ff00;
+            --green-dim: #00aa00;
+            --green-glow: #00ff0066;
+            --amber: #ffaa00;
+            --red: #ff4444;
+            --border: #00ff0033;
+            --border-light: #00ff0022;
+        }
+        body {
+            font-family: 'VT323', monospace;
+            background: var(--bg);
+            color: var(--green);
+            min-height: 100vh;
+        }
+        body::before {
+            content: "";
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: repeating-linear-gradient(0deg, rgba(0,0,0,0.15) 0px, rgba(0,0,0,0.15) 1px, transparent 1px, transparent 2px);
+            pointer-events: none;
+            z-index: 1000;
+        }
+        .container {
+            max-width: 700px;
+            margin: 0 auto;
+            min-height: 100vh;
+            border-left: 1px solid var(--border);
+            border-right: 1px solid var(--border);
+        }
+        header {
+            position: sticky;
+            top: 0;
+            background: rgba(0,0,0,0.95);
+            backdrop-filter: blur(10px);
+            border-bottom: 1px solid var(--border);
+            padding: 15px 20px;
+            z-index: 100;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .logo {
+            font-size: 28px;
+            color: var(--green);
+            text-shadow: 0 0 10px var(--green-glow);
+        }
+        nav {
+            display: flex;
+            gap: 20px;
+        }
+        nav a {
+            color: var(--green-dim);
+            text-decoration: none;
+            font-size: 18px;
+            padding: 8px 16px;
+            border: 1px solid transparent;
+            transition: all 0.2s;
+        }
+        nav a:hover, nav a.active {
+            color: var(--green);
+            border-color: var(--green);
+            text-shadow: 0 0 10px var(--green-glow);
+        }
+        .tabs {
+            display: flex;
+            border-bottom: 1px solid var(--border);
+        }
+        .tab {
+            flex: 1;
+            padding: 15px;
+            text-align: center;
+            color: var(--green-dim);
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+        }
+        .tab:hover {
+            background: var(--bg-hover);
+        }
+        .tab.active {
+            color: var(--green);
+            border-bottom-color: var(--green);
+        }
+        .compose-area {
+            padding: 20px;
+            border-bottom: 1px solid var(--border);
+        }
+        .compose-box {
+            display: flex;
+            gap: 15px;
+        }
+        .avatar {
+            width: 48px;
+            height: 48px;
+            border-radius: 50%;
+            background: var(--green-dim);
+            border: 2px solid var(--green);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            flex-shrink: 0;
+        }
+        .avatar.small {
+            width: 36px;
+            height: 36px;
+            font-size: 14px;
+        }
+        .compose-input {
+            flex: 1;
+        }
+        .compose-input textarea {
+            width: 100%;
+            background: transparent;
+            border: none;
+            color: var(--green);
+            font-family: inherit;
+            font-size: 20px;
+            resize: none;
+            outline: none;
+            min-height: 80px;
+        }
+        .compose-input textarea::placeholder {
+            color: var(--green-dim);
+        }
+        .compose-actions {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid var(--border-light);
+        }
+        .char-count {
+            color: var(--green-dim);
+            font-size: 16px;
+        }
+        .char-count.warning { color: var(--amber); }
+        .char-count.error { color: var(--red); }
+        .btn {
+            padding: 10px 24px;
+            background: var(--green);
+            color: var(--bg);
+            border: none;
+            font-family: inherit;
+            font-size: 18px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .btn:hover {
+            box-shadow: 0 0 20px var(--green-glow);
+        }
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .btn.outline {
+            background: transparent;
+            color: var(--green);
+            border: 1px solid var(--green);
+        }
+        .feed {
+            display: flex;
+            flex-direction: column;
+        }
+        .post {
+            padding: 15px 20px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            gap: 15px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .post:hover {
+            background: var(--bg-hover);
+        }
+        .post-content {
+            flex: 1;
+            min-width: 0;
+        }
+        .post-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 5px;
+        }
+        .post-name {
+            font-weight: bold;
+            color: var(--green);
+        }
+        .post-handle {
+            color: var(--green-dim);
+        }
+        .post-time {
+            color: var(--green-dim);
+        }
+        .post-text {
+            font-size: 18px;
+            line-height: 1.4;
+            word-wrap: break-word;
+            white-space: pre-wrap;
+        }
+        .post-actions {
+            display: flex;
+            gap: 40px;
+            margin-top: 15px;
+        }
+        .action {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--green-dim);
+            cursor: pointer;
+            transition: color 0.2s;
+            font-size: 16px;
+        }
+        .action:hover {
+            color: var(--green);
+        }
+        .action.liked {
+            color: var(--red);
+        }
+        .action svg {
+            width: 18px;
+            height: 18px;
+        }
+        .profile-setup {
+            padding: 40px 20px;
+            text-align: center;
+        }
+        .profile-setup h2 {
+            font-size: 28px;
+            margin-bottom: 10px;
+        }
+        .profile-setup p {
+            color: var(--green-dim);
+            margin-bottom: 30px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+            text-align: left;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            color: var(--green-dim);
+        }
+        .form-group input {
+            width: 100%;
+            padding: 12px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            color: var(--green);
+            font-family: inherit;
+            font-size: 18px;
+        }
+        .form-group input:focus {
+            outline: none;
+            border-color: var(--green);
+            box-shadow: 0 0 10px var(--green-glow);
+        }
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--green-dim);
+        }
+        .empty-state h3 {
+            font-size: 24px;
+            margin-bottom: 10px;
+            color: var(--green);
+        }
+        .notification {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            padding: 15px 25px;
+            background: var(--green);
+            color: var(--bg);
+            font-size: 18px;
+            z-index: 10000;
+            animation: slideIn 0.3s ease;
+        }
+        .notification.error {
+            background: var(--red);
+        }
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: var(--green-dim);
+        }
+        .profile-header {
+            padding: 20px;
+            border-bottom: 1px solid var(--border);
+        }
+        .profile-info {
+            display: flex;
+            gap: 20px;
+            align-items: flex-start;
+        }
+        .profile-avatar {
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            background: var(--green-dim);
+            border: 3px solid var(--green);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 32px;
+        }
+        .profile-details h2 {
+            font-size: 24px;
+            margin-bottom: 5px;
+        }
+        .profile-stats {
+            display: flex;
+            gap: 20px;
+            margin-top: 15px;
+        }
+        .stat {
+            color: var(--green-dim);
+        }
+        .stat strong {
+            color: var(--green);
+            margin-right: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="logo">> KAYAKER_</div>
+            <nav>
+                <a href="/">HOME</a>
+                <a href="/chat">CHAT</a>
+                <a href="/marketplace">MARKET</a>
+                <a href="/kayaker" class="active">KAYAKER</a>
+            </nav>
+        </header>
+
+        <div id="profile-setup" style="display:none;">
+            <div class="profile-setup">
+                <h2>> CREATE YOUR PROFILE</h2>
+                <p>Set up your Kayaker identity to start posting</p>
+                <div class="form-group">
+                    <label>@HANDLE (3-20 characters, letters/numbers/underscore)</label>
+                    <input type="text" id="setup-handle" placeholder="your_handle" maxlength="20">
+                </div>
+                <div class="form-group">
+                    <label>DISPLAY NAME</label>
+                    <input type="text" id="setup-name" placeholder="Anonymous User" maxlength="50">
+                </div>
+                <div class="form-group">
+                    <label>BIO</label>
+                    <input type="text" id="setup-bio" placeholder="Tell the world about yourself..." maxlength="160">
+                </div>
+                <button class="btn" onclick="createProfile()">CREATE PROFILE</button>
+            </div>
+        </div>
+
+        <div id="main-content" style="display:none;">
+            <div class="tabs">
+                <div class="tab active" data-feed="explore">EXPLORE</div>
+                <div class="tab" data-feed="home">FOLLOWING</div>
+                <div class="tab" data-feed="profile">MY POSTS</div>
+            </div>
+
+            <div class="compose-area">
+                <div class="compose-box">
+                    <div class="avatar" id="my-avatar">?</div>
+                    <div class="compose-input">
+                        <textarea id="compose-text" placeholder="What's happening?" maxlength="500"></textarea>
+                        <div class="compose-actions">
+                            <span class="char-count"><span id="char-count">0</span>/500</span>
+                            <button class="btn" id="post-btn" onclick="createPost()" disabled>POST</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="feed" id="feed">
+                <div class="loading">Loading posts...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentFeed = 'explore';
+        let myProfile = null;
+        let cursor = '';
+        let loading = false;
+
+        // Initialize
+        async function init() {
+            try {
+                const res = await fetch('/api/kayaker/profile');
+                const data = await res.json();
+                if (data.error || !data.handle) {
+                    document.getElementById('profile-setup').style.display = 'block';
+                    document.getElementById('main-content').style.display = 'none';
+                } else {
+                    myProfile = data;
+                    document.getElementById('profile-setup').style.display = 'none';
+                    document.getElementById('main-content').style.display = 'block';
+                    document.getElementById('my-avatar').textContent = data.handle[0].toUpperCase();
+                    loadFeed();
+                }
+            } catch (e) {
+                showNotification('Failed to load profile', true);
+            }
+        }
+
+        // Create profile
+        async function createProfile() {
+            const handle = document.getElementById('setup-handle').value.trim();
+            const name = document.getElementById('setup-name').value.trim() || 'Anonymous';
+            const bio = document.getElementById('setup-bio').value.trim();
+
+            if (!/^[a-zA-Z0-9_]{3,20}$/.test(handle)) {
+                showNotification('Invalid handle format', true);
+                return;
+            }
+
+            try {
+                const res = await fetch('/api/kayaker/profile', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ handle, display_name: name, bio })
+                });
+                const data = await res.json();
+                if (data.error) {
+                    showNotification(data.error, true);
+                    return;
+                }
+                myProfile = data;
+                document.getElementById('profile-setup').style.display = 'none';
+                document.getElementById('main-content').style.display = 'block';
+                document.getElementById('my-avatar').textContent = handle[0].toUpperCase();
+                showNotification('Profile created!');
+                loadFeed();
+            } catch (e) {
+                showNotification('Failed to create profile', true);
+            }
+        }
+
+        // Load feed
+        async function loadFeed(append = false) {
+            if (loading) return;
+            loading = true;
+
+            const feedEl = document.getElementById('feed');
+            if (!append) {
+                feedEl.innerHTML = '<div class="loading">Loading posts...</div>';
+                cursor = '';
+            }
+
+            try {
+                const params = new URLSearchParams({
+                    type: currentFeed,
+                    limit: '20'
+                });
+                if (cursor) params.set('cursor', cursor);
+                if (currentFeed === 'profile' && myProfile) {
+                    params.set('user_id', myProfile.id);
+                }
+
+                const res = await fetch('/api/kayaker/feed?' + params);
+                const data = await res.json();
+
+                if (data.error) {
+                    feedEl.innerHTML = '<div class="empty-state"><h3>Error</h3><p>' + data.error + '</p></div>';
+                    return;
+                }
+
+                if (!append) feedEl.innerHTML = '';
+
+                if (!data.posts || data.posts.length === 0) {
+                    if (!append) {
+                        feedEl.innerHTML = '<div class="empty-state"><h3>No posts yet</h3><p>Be the first to post something!</p></div>';
+                    }
+                    return;
+                }
+
+                data.posts.forEach(post => {
+                    feedEl.appendChild(createPostElement(post));
+                });
+
+                cursor = data.next_cursor || '';
+            } catch (e) {
+                feedEl.innerHTML = '<div class="empty-state"><h3>Error</h3><p>Failed to load posts</p></div>';
+            } finally {
+                loading = false;
+            }
+        }
+
+        // Create post element
+        function createPostElement(post) {
+            const div = document.createElement('div');
+            div.className = 'post';
+            div.onclick = () => viewPost(post.id);
+
+            const content = post.decrypted_content || '[Encrypted]';
+            const handle = post.author_handle || 'anonymous';
+            const time = formatTime(post.created_at);
+            const initial = handle[0].toUpperCase();
+
+            div.innerHTML = ` + "`" + `
+                <div class="avatar small">${initial}</div>
+                <div class="post-content">
+                    <div class="post-header">
+                        <span class="post-name">${handle}</span>
+                        <span class="post-handle">@${handle}</span>
+                        <span class="post-time">· ${time}</span>
+                    </div>
+                    <div class="post-text">${escapeHtml(content)}</div>
+                    <div class="post-actions">
+                        <div class="action" onclick="event.stopPropagation(); replyTo('${post.id}')">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
+                            </svg>
+                            <span>${post.reply_count || 0}</span>
+                        </div>
+                        <div class="action" onclick="event.stopPropagation(); repost('${post.id}')">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M17 1l4 4-4 4M3 11V9a4 4 0 0 1 4-4h14M7 23l-4-4 4-4M21 13v2a4 4 0 0 1-4 4H3"/>
+                            </svg>
+                            <span>${post.repost_count || 0}</span>
+                        </div>
+                        <div class="action ${post.liked ? 'liked' : ''}" onclick="event.stopPropagation(); toggleLike('${post.id}', this)">
+                            <svg viewBox="0 0 24 24" fill="${post.liked ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2">
+                                <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+                            </svg>
+                            <span>${post.like_count || 0}</span>
+                        </div>
+                    </div>
+                </div>
+            ` + "`" + `;
+
+            return div;
+        }
+
+        // Create a new post
+        async function createPost() {
+            const textarea = document.getElementById('compose-text');
+            const content = textarea.value.trim();
+
+            if (!content) return;
+
+            const btn = document.getElementById('post-btn');
+            btn.disabled = true;
+            btn.textContent = 'POSTING...';
+
+            try {
+                const res = await fetch('/api/kayaker/posts', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ content, visibility: 'public' })
+                });
+                const data = await res.json();
+
+                if (data.error) {
+                    showNotification(data.error, true);
+                    return;
+                }
+
+                textarea.value = '';
+                document.getElementById('char-count').textContent = '0';
+                showNotification('Posted!');
+                loadFeed();
+            } catch (e) {
+                showNotification('Failed to post', true);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'POST';
+            }
+        }
+
+        // Toggle like
+        async function toggleLike(postId, el) {
+            const isLiked = el.classList.contains('liked');
+            const method = isLiked ? 'DELETE' : 'POST';
+            const url = isLiked ? '/api/kayaker/like?post_id=' + postId : '/api/kayaker/like';
+
+            try {
+                const opts = { method };
+                if (!isLiked) {
+                    opts.headers = {'Content-Type': 'application/json'};
+                    opts.body = JSON.stringify({ post_id: postId });
+                }
+                await fetch(url, opts);
+
+                el.classList.toggle('liked');
+                const countEl = el.querySelector('span');
+                const count = parseInt(countEl.textContent) || 0;
+                countEl.textContent = isLiked ? Math.max(0, count - 1) : count + 1;
+
+                const svg = el.querySelector('svg');
+                svg.setAttribute('fill', isLiked ? 'none' : 'currentColor');
+            } catch (e) {
+                showNotification('Failed to like post', true);
+            }
+        }
+
+        // View single post
+        function viewPost(postId) {
+            // For now, just reload - could implement modal view
+            console.log('View post:', postId);
+        }
+
+        // Reply to post
+        function replyTo(postId) {
+            const textarea = document.getElementById('compose-text');
+            textarea.focus();
+            textarea.dataset.replyTo = postId;
+            textarea.placeholder = 'Write your reply...';
+        }
+
+        // Repost
+        async function repost(postId) {
+            showNotification('Reposting coming soon!');
+        }
+
+        // Format time
+        function formatTime(dateStr) {
+            const date = new Date(dateStr);
+            const now = new Date();
+            const diff = (now - date) / 1000;
+
+            if (diff < 60) return 'now';
+            if (diff < 3600) return Math.floor(diff / 60) + 'm';
+            if (diff < 86400) return Math.floor(diff / 3600) + 'h';
+            return date.toLocaleDateString();
+        }
+
+        // Escape HTML
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Show notification
+        function showNotification(msg, isError = false) {
+            const notif = document.createElement('div');
+            notif.className = 'notification' + (isError ? ' error' : '');
+            notif.textContent = msg;
+            document.body.appendChild(notif);
+            setTimeout(() => notif.remove(), 3000);
+        }
+
+        // Tab switching
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                currentFeed = tab.dataset.feed;
+                loadFeed();
+            });
+        });
+
+        // Character count
+        document.getElementById('compose-text').addEventListener('input', (e) => {
+            const len = e.target.value.length;
+            const countEl = document.getElementById('char-count');
+            countEl.textContent = len;
+            countEl.parentElement.className = 'char-count' + 
+                (len > 450 ? ' warning' : '') + 
+                (len >= 500 ? ' error' : '');
+            document.getElementById('post-btn').disabled = len === 0 || len > 500;
+        });
+
+        // Infinite scroll
+        window.addEventListener('scroll', () => {
+            if (window.innerHeight + window.scrollY >= document.body.offsetHeight - 500) {
+                if (cursor && !loading) loadFeed(true);
+            }
+        });
+
+        // Initialize
+        init();
     </script>
 </body>
 </html>`
