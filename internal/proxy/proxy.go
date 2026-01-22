@@ -275,6 +275,13 @@ func (p *Proxy) handleKykRequest(conn net.Conn, req *http.Request) {
 		}
 		p.proxyToHomepage(conn, req)
 		return
+	case "kayaker.kyk":
+		// Preserve API paths, only rewrite root to /kayaker
+		if req.URL.Path == "/" || req.URL.Path == "" {
+			req.URL.Path = "/kayaker"
+		}
+		p.proxyToHomepage(conn, req)
+		return
 	}
 
 	// Resolve the .kyk domain

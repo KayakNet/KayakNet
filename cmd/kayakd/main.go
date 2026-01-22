@@ -369,7 +369,8 @@ func main() {
 		} else {
 			fmt.Printf("║  [+] Browser proxy: HTTP %d, SOCKS5 %d                 ║\n", *proxyHTTP, *proxySOCKS)
 			fmt.Println("║  [+] Homepage: http://home.kyk                         ║")
-			fmt.Println("║  [+] Chat: http://chat.kyk  Market: http://market.kyk  ║")
+			fmt.Println("║  [+] Chat: http://chat.kyk  Kayaker: http://kayaker.kyk║")
+			fmt.Println("║  [+] Market: http://market.kyk                         ║")
 		}
 	}
 	fmt.Println("╚════════════════════════════════════════════════════════════╝")
